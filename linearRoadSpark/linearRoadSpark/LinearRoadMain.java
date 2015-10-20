@@ -22,7 +22,6 @@ public class LinearRoadMain {
 	protected static int currentPartitions;
 	protected static final int maxCheckpoint = 4;
 	
-	
 	public static void main(String[] args) {
 		if (args.length < 2) {
 			System.err.println("Usage: LinearRoad <hostname> <port>");
@@ -41,7 +40,7 @@ public class LinearRoadMain {
 		// Create the context with a 1 second batch size
 		SparkConf sparkConf = new SparkConf().setAppName("LinearRoad");
 		sparkConf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
-		sparkConf.set("spark.default.parallelism", ""+LinearRoadMain.currentPartitions);
+		sparkConf.set("spark.default.parallelism", "" + LinearRoadMain.currentPartitions);
 		sparkConf.set("spark.streaming.blockInterval", "200");
 		//sparkConf.set("spark.streaming.unpersist", "false");
 		sparkConf.set("spark.speculation", "true");
@@ -55,13 +54,17 @@ public class LinearRoadMain {
 		
 		LinearRoad lr = new LinearRoad(ssc);
 		
+		JavaPairDStream<String, SegmentState> stateDstream=null;
 		JavaPairDStream<Integer, Tuple2<Long, List<Integer>>> initTuples = lr.parseInitialTuples(ssc, args[0], args[1]);
 		JavaPairDStream<Integer, Tuple2<Long, List<Integer>>> positionStream = lr.generatePositionStream(initTuples);
 		JavaPairDStream<String, Tuple2<Long, List<Integer>>> segmentStream = lr.generateSegmentStream(positionStream);
 		
 		JavaPairDStream<String, SegmentState> data = lr.checkVehiclesLeftSegment(ssc, positionStream); 
-		JavaPairDStream<String, SegmentState> stateDstream = lr.checkAccidents(data, segmentStream);
+		stateDstream = lr.checkAccidents(data, segmentStream);
+		stateDstream.cache();
 		lr.outputAccidents(ssc, segmentStream, positionStream, stateDstream);
+		
+		lr.outputTolls(positionStream, segmentStream, stateDstream);
 		
 		ssc.start();
 		ssc.awaitTermination();

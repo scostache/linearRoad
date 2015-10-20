@@ -55,7 +55,8 @@ public class LinearRoad implements Serializable{
 				new Tuple2<String, SegmentState>("1_1", new SegmentState()));
 		globalSegmentState = ssc.sc().parallelizePairs(tuples, LinearRoadMain.currentPartitions);
 		
-		globalSegmentState.persist(StorageLevel.MEMORY_AND_DISK());
+		globalSegmentState.cache();
+
 	}
 
 
@@ -107,6 +108,7 @@ public class LinearRoad implements Serializable{
 						return false;
 					}
 				});
+		//positionStream.cache();
 		return positionStream;
 	}
 
@@ -131,12 +133,11 @@ public class LinearRoad implements Serializable{
 							return new Tuple2<String, Tuple2<Long, List<Integer>>>(seg, s1._2);
 							}
 							}).repartitionAndSortWithinPartitions(
-								new HashPartitioner(LinearRoadMain.currentPartitions));
+									new HashPartitioner(LinearRoadMain.currentPartitions));
 						res.cache();
 						return res;
 					}
 				});
-		//segmentStream.persist();
 		return segmentStream;
 	}
 
@@ -227,71 +228,51 @@ public class LinearRoad implements Serializable{
 					@Override
 					public Tuple2<Integer, List<Integer>> call(Tuple2<Integer, Tuple2<Long, List<Integer>>> s) {
 						ArrayList elems = new ArrayList();
-						elems.add(s._2._2.get(0)); // time
-						elems.add(s._2._2.get(3)); // xway
-						elems.add(s._2._2.get(6)); // position
-						elems.add(s._2._2.get(7)); // segment
+						elems.add(s._2._2.get(0)); // time (0)
+						elems.add(s._2._2.get(3)); // xway (1)
+						elems.add(s._2._2.get(6)); // position (2)
+						elems.add(s._2._2.get(7)); // segment (3)
 						elems.add(0); // does vehicle changed segment or not? for reduce
 						return new Tuple2(s._2._2.get(1), elems);
 					}
 				})
-				.groupByKeyAndWindow(new Duration(60000), LinearRoadMain.windowSlide, LinearRoadMain.currentPartitions)
-				.flatMapToPair(
-						new PairFlatMapFunction<Tuple2<Integer, Iterable<List<Integer>>>, String, Tuple2<Integer, Integer>>() {
+				.reduceByKeyAndWindow(
+						new Function2<List<Integer>, List<Integer>, List<Integer>>() {
 							@Override
-							public Iterable<Tuple2<String, Tuple2<Integer, Integer>>> call(
-									Tuple2<Integer, Iterable<List<Integer>>> t) throws Exception {
-								ArrayList<Tuple2<String, Tuple2<Integer, Integer>>> newSegment = new ArrayList();
-								boolean changed_segment = false;
-								Iterator<List<Integer>> it = t._2.iterator();
-								List<Integer> elems = it.next();
-								String segstr = "" + elems.get(1) + '_' + elems.get(2);
-								Integer time = elems.get(0);
-								Integer pos = elems.get(3);
-								while (it.hasNext()) {
-									elems = it.next();
-									String segstr2 = "" + elems.get(1) + '_' + elems.get(2);
-									if (!segstr2.contentEquals(segstr)) {
-										changed_segment = true;
-										Integer time2 = elems.get(0);
-										if (time2 > time)
-											newSegment.add(new Tuple2(segstr, new Tuple2(t._1, pos)));
-										else
-											newSegment.add(new Tuple2(segstr2, new Tuple2(t._1, elems.get(3))));
-										break;
-
-									}
+							public List<Integer> call(List<Integer> v1, List<Integer> v2) throws Exception {
+								if (v1.get(3) == v2.get(3)) {
+									if(v1.get(0) > v2.get(0))
+										return v1;
+									else
+										return v2;
 								}
-								return newSegment;
+								if(v1.get(0) > v2.get(0)) {
+									v2.remove(v2.size()-1);
+									v2.add(1); // we mark the change in segment
+									return v2;
+								}
+								v1.remove(v1.size()-1);
+								v1.add(1); // we mark the change in segment
+								return v1;
+							}
+							
+						}, new Duration(60000), LinearRoadMain.windowSlide).
+							filter(new Function<Tuple2<Integer, List<Integer>>, Boolean> () {
+							@Override
+							public Boolean call(Tuple2<Integer, List<Integer>> v1) throws Exception {
+								if(v1._2.get(v1._2.size()-1) > 0)
+									return true;
+								return false;
+							}
+						}).mapToPair(
+						new PairFunction<Tuple2<Integer, List<Integer>>, String, Tuple2<Integer, Integer>>() {
+							@Override
+							public Tuple2<String, Tuple2<Integer, Integer>> call(
+									Tuple2<Integer, List<Integer>> t) throws Exception {
+								return new Tuple2( "" + t._2.get(1) + '_' + t._2.get(2), 
+										new Tuple2(t._1,t._2.get(3)));
 							}
 						});
-		// tmp.print(20);
-		/*
-		return tmp.transformToPair(new Function2<JavaPairRDD<String, Tuple2<Integer, Integer>>, Time, 
-				JavaPairRDD<String, SegmentState>>() {
-			@Override
-			public JavaPairRDD<String, SegmentState> call(JavaPairRDD<String, Tuple2<Integer, Integer>> newbatch, Time v2)
-					throws Exception {
-				JavaPairRDD<String, SegmentState> newstate = globalSegmentState.join(newbatch).mapValues(
-						new Function<Tuple2<SegmentState, Tuple2<Integer, Integer>>, SegmentState>() {
-					@Override
-					public SegmentState call(Tuple2<SegmentState, Tuple2<Integer, Integer>> v1)
-							throws Exception {
-						return updateState(v1._2, v1._1);
-					}
-				});
-				globalSegmentState.unpersist(false);
-				globalSegmentState = newstate.persist(StorageLevel.MEMORY_AND_DISK());
-				if (checkpointCount == 0) {
-					globalSegmentState.checkpoint();
-				}
-				//globalSegmentState.take(1);
-				return globalSegmentState;
-			}
-
-		});
-		*/
-		
 		return tmp.updateStateByKey(removeVehicleFromSegment, new HashPartitioner(LinearRoadMain.currentPartitions),
 				globalSegmentState);
 		
@@ -497,9 +478,12 @@ public class LinearRoad implements Serializable{
 	 * 
 	 */
 	
-	public static void outputTolls(JavaPairDStream<String, Tuple2<Long, List<Integer>>> segmentStream,
+	public static void outputTolls(
+			JavaPairDStream<Integer, Tuple2<Long, List<Integer>>> positionStream,
+			JavaPairDStream<String, Tuple2<Long, List<Integer>>> segmentStream,
 			JavaPairDStream<String, SegmentState> stateDstream) {
-		computeAndNotifyTolls(segmentStream, stateDstream).foreachRDD(
+		computeAndNotifyTolls(positionStream, segmentStream, stateDstream).
+		foreachRDD(
 				new Function2<JavaPairRDD<String, Tuple2<Tuple2<Tuple2<Tuple2<Long, List<Integer>>, SegmentState>, Double>, Integer>>, Time, Void>() {
 
 					@Override
@@ -529,22 +513,40 @@ public class LinearRoad implements Serializable{
 						return null;
 					}
 				});
-
 	}
 	
-	private static JavaPairDStream<String, Tuple2<Tuple2<Tuple2<Tuple2<Long, List<Integer>>, SegmentState>, Double>, Integer>> computeAndNotifyTolls(
+	private static JavaPairDStream<String, Tuple2<Tuple2<Tuple2<Tuple2<Long, List<Integer>>, SegmentState>, Double>, Integer>> 
+		computeAndNotifyTolls(
+			JavaPairDStream<Integer, Tuple2<Long, List<Integer>>> positionStream,
 			JavaPairDStream<String, Tuple2<Long, List<Integer>>> segmentStream,
 			JavaPairDStream<String, SegmentState> stateDstream) {
 		// compute windowed avg speed per segmentStream
-
-		JavaPairDStream<String, Double> avgbySegment = segmentStream.mapToPair(
-				new PairFunction<Tuple2<String, Tuple2<Long, List<Integer>>>, String, Tuple2<Integer, Integer>>() {
-					@Override
-					public Tuple2<String, Tuple2<Integer, Integer>> call(Tuple2<String, Tuple2<Long, List<Integer>>> t)
-							throws Exception {
-						return new Tuple2(t._1 + "_" + t._2._2.get(1), new Tuple2(t._2._2.get(2), 1));
-					}
-				}).reduceByKeyAndWindow(
+		JavaPairDStream<String, Double> avgbySegment = segmentStream.transformToPair(new
+					Function2<JavaPairRDD<String, Tuple2<Long, List<Integer>>>, Time, 
+					JavaPairRDD<String, Tuple2<Integer, Integer>>>() {
+						@Override
+						public JavaPairRDD<String, Tuple2<Integer, Integer>> call(
+								JavaPairRDD<String, Tuple2<Long, List<Integer>>> v1, Time v2) throws Exception {
+							return v1.mapPartitionsToPair(new PairFlatMapFunction<Iterator<Tuple2<String, 
+									Tuple2<Long, List<Integer>>>>,
+									String, Tuple2<Integer, Integer>>() {
+										@Override
+										public Iterable<Tuple2<String, Tuple2<Integer, Integer>>> call(
+												Iterator<Tuple2<String, Tuple2<Long, List<Integer>>>> t)
+														throws Exception {
+											ArrayList<Tuple2<String, Tuple2<Integer, Integer>>> res = new 
+													ArrayList<Tuple2<String, Tuple2<Integer, Integer>>>();
+											while(t.hasNext()) {
+												Tuple2<String, Tuple2<Long, List<Integer>>> v1 = t.next();
+												String[] segmentl = v1._1.split("_");
+												String segment = segmentl[0] + "_" + segmentl[1];
+												res.add(new Tuple2(v1._1 + "_" + v1._2._2.get(1), new Tuple2(v1._2._2.get(2), 1)));
+											}
+											return res;
+										}
+							}, true);
+						}
+		}).reduceByKeyAndWindow(
 						new Function2<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>, Tuple2<Integer, Integer>>() {
 							@Override
 							public Tuple2<Integer, Integer> call(Tuple2<Integer, Integer> v1,
@@ -553,20 +555,34 @@ public class LinearRoad implements Serializable{
 								// "+v2._1+" "+v2._2);
 								return new Tuple2(v1._1 + v2._1, v1._2 + v2._2);
 							}
-						}, LinearRoadMain.windowAverage, LinearRoadMain.windowSlide, LinearRoadMain.currentPartitions)
-				.mapToPair(
-						new PairFunction<Tuple2<String, Tuple2<Integer, Integer>>, String, Tuple2<Integer, Double>>() {
+						}, LinearRoadMain.windowAverage, LinearRoadMain.windowSlide,
+						new SegmentPartitioner(LinearRoadMain.currentPartitions))
+				.transformToPair(new
+						Function2<JavaPairRDD<String, Tuple2<Integer, Integer>>, Time, 
+						JavaPairRDD<String, Tuple2<Integer, Double>>>() {
 							@Override
-							public Tuple2<String, Tuple2<Integer, Double>> call(
-									Tuple2<String, Tuple2<Integer, Integer>> v1) throws Exception {
-								// System.out.println(v1._1+" "+v1._2._1+" "+
-								// v1._2._2);
-								String[] segmentl = v1._1.split("_");
-								String segment = segmentl[0] + "_" + segmentl[1];
-								return new Tuple2(segment, new Tuple2(1, new Double(v1._2._1 / v1._2._2)));
+							public JavaPairRDD<String, Tuple2<Integer, Double>> call(
+									JavaPairRDD<String, Tuple2<Integer, Integer>> v1, Time v2) throws Exception {
+								return v1.mapPartitionsToPair(new PairFlatMapFunction<Iterator<Tuple2<String, 
+										Tuple2<Integer, Integer>>>,
+										String, Tuple2<Integer, Double>>() {
+											@Override
+											public Iterable<Tuple2<String, Tuple2<Integer, Double>>> call(
+													Iterator<Tuple2<String, Tuple2<Integer, Integer>>> t)
+															throws Exception {
+												ArrayList<Tuple2<String, Tuple2<Integer, Double>>> res = new 
+														ArrayList<Tuple2<String, Tuple2<Integer, Double>>>();
+												while(t.hasNext()) {
+													Tuple2<String, Tuple2<Integer, Integer>> v1 = t.next();
+													String[] segmentl = v1._1.split("_");
+													String segment = segmentl[0] + "_" + segmentl[1];
+													res.add(new Tuple2(segment, new Tuple2(1, new Double(v1._2._1 / v1._2._2))));
+												}
+												return res;
+											}
+								}, true);
 							}
-						})
-				.reduceByKey(
+					}).reduceByKey(
 						new Function2<Tuple2<Integer, Double>, Tuple2<Integer, Double>, Tuple2<Integer, Double>>() {
 							@Override
 							public Tuple2<Integer, Double> call(Tuple2<Integer, Double> v1, Tuple2<Integer, Double> v2)
@@ -586,22 +602,59 @@ public class LinearRoad implements Serializable{
 						return new Tuple2(t._1, new Double(t._2._2 / t._2._1));
 					}
 				});
-
-		JavaPairDStream<String, Integer> mincarsbySegment = segmentStream
-				.mapToPair(new PairFunction<Tuple2<String, Tuple2<Long, List<Integer>>>, String, String>() {
-					@SuppressWarnings("unchecked")
+		avgbySegment.cache();
+		JavaPairDStream<String, Integer> mincarsbySegment = 
+		segmentStream.transformToPair(new Function2<
+						JavaPairRDD<String, Tuple2<Long, List<Integer>>>, Time, JavaPairRDD<String, Integer>>() {
+							@Override
+							public JavaPairRDD<String, Integer> call(
+									JavaPairRDD<String, Tuple2<Long, List<Integer>>> v1, Time v2) throws Exception {
+								return v1.mapPartitionsToPair(new PairFlatMapFunction<Iterator<Tuple2<String, Tuple2<Long, List<Integer>>>>, 
+										String, Integer>() {
+											@Override
+											public Iterable<Tuple2<String, Integer>> call(
+													Iterator<Tuple2<String, Tuple2<Long, List<Integer>>>> t)
+															throws Exception {
+												ArrayList<Tuple2<String, Integer>> resf = new ArrayList<Tuple2<String, Integer>>(); 
+												while(t.hasNext()) {
+													Tuple2<String, Tuple2<Long, List<Integer>>> v = t.next();
+													resf.add(new Tuple2( v._1 + "_" + v._2._2.get(1), 1));
+												}
+												return resf;
+											}
+								}, true);
+							}
+				}).reduceByKeyAndWindow(new Function2<Integer, Integer, Integer>() {
 					@Override
-					public Tuple2<String, String> call(Tuple2<String, Tuple2<Long, List<Integer>>> v1)
-							throws Exception {
-						return new Tuple2(v1._1, v1._1 + "_" + v1._2._2.get(1));
+					public Integer call(Integer v1, Integer v2) throws Exception {
+						return 1;
 					}
-				}).countByValueAndWindow(LinearRoadMain.windowCount, LinearRoadMain.windowSlide)
-				.mapToPair(new PairFunction<Tuple2<Tuple2<String, String>, Long>, String, Integer>() {
-					@Override
-					public Tuple2<String, Integer> call(Tuple2<Tuple2<String, String>, Long> v1) throws Exception {
-						return new Tuple2(v1._1._1, 1);
-					}
-				}).reduceByKey(new Function2<Integer, Integer, Integer>() {
+				}, LinearRoadMain.windowCount, LinearRoadMain.windowSlide,
+						new SegmentPartitioner(LinearRoadMain.currentPartitions)).transformToPair(new
+						Function2<JavaPairRDD<String, Integer>, Time, 
+						JavaPairRDD<String, Integer>>() {
+							@Override
+							public JavaPairRDD<String, Integer> call(
+									JavaPairRDD<String, Integer> v1, Time v2) throws Exception {
+								return v1.mapPartitionsToPair(new PairFlatMapFunction<Iterator<Tuple2<String, 
+										Integer>>, String, Integer>() {
+											@Override
+											public Iterable<Tuple2<String, Integer>> call(
+													Iterator<Tuple2<String, Integer>> t)
+															throws Exception {
+												ArrayList<Tuple2<String, Integer>> res = new 
+														ArrayList<Tuple2<String, Integer>>();
+												while(t.hasNext()) {
+													Tuple2<String, Integer> v1 = t.next();
+													String[] segmentl = v1._1.split("_");
+													String segment = segmentl[0] + "_" + segmentl[1];
+													res.add(new Tuple2(segment, v1._2));
+											}
+												return res;
+											}
+								}, true);
+							}
+					}).reduceByKey(new Function2<Integer, Integer, Integer>() {
 					@Override
 					public Integer call(Integer v1, Integer v2) throws Exception {
 						return v1 + v2;
@@ -610,7 +663,6 @@ public class LinearRoad implements Serializable{
 
 		JavaPairDStream<String, Tuple2<Tuple2<Long, List<Integer>>, SegmentState>> joinedstateDstream = segmentStream
 				.join(stateDstream);
-
 		JavaPairDStream<String, Tuple2<Tuple2<Tuple2<Tuple2<Long, List<Integer>>, SegmentState>, Double>, Integer>> avgperSegmentState = 
 				joinedstateDstream.join(avgbySegment).join(mincarsbySegment);
 		// we need to send notifications to vehicles which are new in this
@@ -621,14 +673,10 @@ public class LinearRoad implements Serializable{
 					public Boolean call(
 							Tuple2<String, Tuple2<Tuple2<Tuple2<Tuple2<Long, List<Integer>>, SegmentState>, Double>, Integer>> v1)
 									throws Exception {
-						// I can compute the toll here, lol
 						SegmentState s = v1._2._1._1._2;
-
 						return s.hasNewVehicles();
 					}
 				});
-
 		return newstateDstream;
 	}
-
 }
