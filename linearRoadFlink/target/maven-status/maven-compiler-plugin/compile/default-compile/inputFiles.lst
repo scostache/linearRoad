@@ -1,3 +1,4 @@
-/home/stefania/workspace/linearRoadFlink/quickstart/src/main/java/org/myorg/quickstart/SocketTextStreamWordCount.java
-/home/stefania/workspace/linearRoadFlink/quickstart/src/main/java/org/myorg/quickstart/WordCount.java
-/home/stefania/workspace/linearRoadFlink/quickstart/src/main/java/org/myorg/quickstart/Job.java
+/home/stefania/workspace/linearRoadFlink/linearRoad/src/main/java/org/myorg/lr/Vehicle.java
+/home/stefania/workspace/linearRoadFlink/linearRoad/src/main/java/org/myorg/lr/LinearRoadFlink.java
+/home/stefania/workspace/linearRoadFlink/linearRoad/src/main/java/org/myorg/lr/MinuteStatistics.java
+/home/stefania/workspace/linearRoadFlink/linearRoad/src/main/java/org/myorg/lr/NovLav.java

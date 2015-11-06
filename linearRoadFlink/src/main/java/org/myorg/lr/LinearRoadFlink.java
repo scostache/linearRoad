@@ -71,10 +71,12 @@ public class LinearRoadFlink {
 		DataStream<String> positionStream = generatePositionStream(initTuples).partitionByHash(new KeyExtractor());
 		// we detect if vehicles are stopped or not
 		DataStream<Tuple3<String, Boolean, Long>> accidents = positionStream.flatMap(new DetectAccidents());
-		// this goes in the next operator which updates accidents and notifies
+		
+		// this goes in the next operator which updates accidents, computes tolls and notifies
 		// incomming vehicles
 		DataStream<Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> alltuplesTollAccident = 
 				positionStream.connect(accidents).flatMap(new NotifyAccidentsAndTolls());
+		//alltuplesTollAccident.print();
 		
 		// filter accidents
 		DataStream<Tuple6<Integer, Integer, Long, Long, Integer, Integer>> accidentTuples =
@@ -94,7 +96,8 @@ public class LinearRoadFlink {
 									public Tuple6<Integer, Integer, Long, Long, Integer, Integer> map(
 											Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double> value)
 													throws Exception {
-										return new Tuple6(value.f0, value.f1, value.f2, value.f3, value.f4, value.f5);
+										return new Tuple6<Integer, Integer, Long, Long, Integer, Integer>(
+												value.f0, value.f1, value.f2, value.f3, value.f4, value.f5);
 									}
 						});
 		DataStream<Tuple6<Integer, Integer, Long, Long, Integer, Integer>> tollTuples = 
@@ -102,7 +105,7 @@ public class LinearRoadFlink {
 					@Override
 					public boolean filter(Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double> value)
 							throws Exception {
-						if(value.f0 == 1)
+						if(value.f0 == 0)
 							return true;
 						return false;
 					}
@@ -112,7 +115,8 @@ public class LinearRoadFlink {
 					public Tuple6<Integer, Integer, Long, Long, Integer, Integer> map(
 							Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double> value)
 									throws Exception {
-						return new Tuple6(value.f0, value.f1, value.f2, value.f3, value.f5, value.f6);
+						return new Tuple6<Integer, Integer, Long, Long, Integer, Integer>(
+								value.f0, value.f1, value.f2, value.f3, value.f5, value.f6.intValue());
 					}
 		});
 		
@@ -138,7 +142,7 @@ public class LinearRoadFlink {
 
 			@Override
 			public boolean filter(String x) {
-				String[] fields = x.split("\\s+");
+				String[] fields = x.split(",");
 				byte typeField = Byte.parseByte(fields[0]);
 
 				if (typeField == 0) {
@@ -164,7 +168,7 @@ public class LinearRoadFlink {
 		public void flatMap(String value, Collector<Tuple3<String, Boolean, Long>> out) throws Exception {
 			// check if vehicle is stopped or not
 			String val = (String) value;
-			String[] fields = val.split("\\s+");
+			String[] fields = val.split(",");
 			int vid = Integer.parseInt(fields[2]);
 			long time = Long.parseLong(fields[1]);
 			int speed = Integer.parseInt(fields[3]);
@@ -266,7 +270,6 @@ public class LinearRoadFlink {
 		private HashMap<String,NovLav> last_novlav;
 		private HashMap<String, Double> segment_tolls;
 		
-		
 		@Override
 		public void open(Configuration parameters) throws Exception {
 			accident_segments = new HashMap<String, Tuple2<Long, Long>>();
@@ -281,7 +284,7 @@ public class LinearRoadFlink {
 				Collector<Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> out)
 				throws Exception {
 			String val = (String) value;
-			String[] fields = val.split("\\s+");
+			String[] fields = val.split(",");
 			int vid = Integer.parseInt(fields[2]);
 			long time = Long.parseLong(fields[1]);
 			int segment = Integer.parseInt(fields[7]);
@@ -317,27 +320,29 @@ public class LinearRoadFlink {
 				}
 			}
 			
+			// compute tolls?
+			double toll = 0;
 			if(minute > last_novlav.get(segid).getMinute()) {
 				// compute stats for last minute
 				double total_avg = 0.0;
-				if(last_minutes.get(segid).size() > 1) {
-					for(MinuteStatistics m : last_minutes.get(segid).subList(0, last_minutes.get(segid).size()-1)) {
+				if(last_minutes.get(segid).size() == LinearRoadFlink.HistorySize) {
+					for(MinuteStatistics m : last_minutes.get(segid).subList(0, last_minutes.get(segid). size()-1)) {
 						total_avg += m.speedAverage();
 					}
-				} else {
-					total_avg = last_minutes.get(segid).get(0).speedAverage();
 				}
+				
 				last_novlav.get(segid).setLav(total_avg);
-				last_novlav.get(segid).setNov(last_minutes.get(segid).
+				if(last_minutes.get(segid).size() >= 1) {
+					last_novlav.get(segid).setNov(last_minutes.get(segid).
 						get(last_minutes.get(segid).size()-1).vehicleCount());
+				}
 				last_novlav.get(segid).setMinute(minute);
 				
-				// compute tolls?
-				double toll = 0;
-				if(last_novlav.get(segid).getLav() >= 40 || last_novlav.get(segid).getNov() <=50) {
+				
+				if( (total_avg >= 40 && last_minutes.get(segid).size() == LinearRoadFlink.HistorySize) || last_novlav.get(segid).getNov() <=50) {
 					toll = 0;
 				} else {
-					toll = 2*(last_novlav.get(segid).getNov() -50)*(last_novlav.get(segid).getNov() -50);
+					toll = 2*(last_novlav.get(segid).getNov()-50)*(last_novlav.get(segid).getNov()-50);
 				}
 				segment_tolls.put(segid, toll);
 			}
@@ -347,6 +352,9 @@ public class LinearRoadFlink {
 				if(previous_segments.get(vid) == segid)
 					return;
 			}
+			
+			previous_segments.put(vid, segid);
+			
 			synchronized(accident_segments) {
 				if(accident_segments.containsKey(segid) && lane != 4) {
 					Tuple2<Long, Long> timeacc = accident_segments.get(segid);
@@ -365,7 +373,7 @@ public class LinearRoadFlink {
 			double vtoll = segment_tolls.get(segid);
 			int sspeed = (int) last_novlav.get(segid).getLav();
 			out.collect(new Tuple7<Integer, Integer, Long, Long, Integer, Integer,Double>
-			(0, vid, time, System.currentTimeMillis()/1000, segment, sspeed, vtoll));
+				(0, vid, time, System.currentTimeMillis()/1000, segment, sspeed, vtoll));
 		}
 		
 		@Override
@@ -389,7 +397,7 @@ public class LinearRoadFlink {
 		@Override
 		@SuppressWarnings("unchecked")
 		public String getKey(String value) {
-			String[] fields = value.split("\\s+");
+			String[] fields = value.split(",");
 			return fields[1] + "_" + fields[2];
 		}
 	}
