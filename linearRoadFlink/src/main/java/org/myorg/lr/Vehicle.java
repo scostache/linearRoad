@@ -32,10 +32,13 @@ public class Vehicle implements Serializable{
 	  }
 	  
 	  void update(int pos, int xway, int seg, int lane, int speed, long time) {
-		  if(pos == this.pos && xway == this.xway && this.seg == seg)
+		  if(pos == this.pos && xway == this.xway && seg == this.seg)
 			  this.nsamepos++;
-		  else
+		  else {
 			  this.nsamepos = 0;
+			  if (this.stopped)
+				  this.stopped = false;
+		  }
 		  if(this.nsamepos == 4)
 			  this.stopped = true;
 		  
@@ -43,6 +46,9 @@ public class Vehicle implements Serializable{
 		  this.isNew = false;
 		  this.time = time;
 		  this.lane = lane;
+		  this.xway = xway;
+		  this.seg = seg;
+		  
 		  timeLastUpdate = time;
 	  }
 	  

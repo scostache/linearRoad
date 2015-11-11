@@ -42,13 +42,11 @@ import org.apache.flink.api.common.functions.RichFlatMapFunction;
 
 
 public class LinearRoadFlink {
-
-	private static final Pattern SPACE = Pattern.compile(",");
 	protected static final int windowAverage = 360; // 5 minutes
 	protected static final int windowSlide = 60;
 	protected static final int windowCount = 120;
 	
-	protected static final int HistorySize = 5;
+	protected static final int HistorySize = 6; // last 5 minutes + current one
 
 
 	public static void main(String[] args) throws Exception {
@@ -63,21 +61,19 @@ public class LinearRoadFlink {
 
 		// set up the execution environment
 		final StreamExecutionEnvironment ssc = StreamExecutionEnvironment.getExecutionEnvironment();
-
 		// ssc.setStreamTimeCharacteristic(TimeCharacteristic.IngestionTime);
-
 		// get input data
 		DataStream<String> initTuples = parseInitialTuples(ssc, args[0], args[1]);
 		DataStream<String> positionStream = generatePositionStream(initTuples).partitionByHash(new KeyExtractor());
 		// we detect if vehicles are stopped or not
 		DataStream<Tuple3<String, Boolean, Long>> accidents = positionStream.flatMap(new DetectAccidents());
 		
+		accidents.writeAsCsv("accidentSegments.log", WriteMode.OVERWRITE);
 		// this goes in the next operator which updates accidents, computes tolls and notifies
 		// incomming vehicles
 		DataStream<Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> alltuplesTollAccident = 
 				positionStream.connect(accidents).flatMap(new NotifyAccidentsAndTolls());
 		//alltuplesTollAccident.print();
-		
 		// filter accidents
 		DataStream<Tuple6<Integer, Integer, Long, Long, Integer, Integer>> accidentTuples =
 				alltuplesTollAccident.filter(
@@ -89,7 +85,6 @@ public class LinearRoadFlink {
 									return true;
 								return false;
 							}
-							
 						}).map(new MapFunction<Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>,
 								Tuple6<Integer, Integer, Long, Long, Integer, Integer>>() {
 									@Override
@@ -119,10 +114,8 @@ public class LinearRoadFlink {
 								value.f0, value.f1, value.f2, value.f3, value.f5, value.f6.intValue());
 					}
 		});
-		
 		accidentTuples.writeAsCsv("accidentTuples.log", WriteMode.OVERWRITE);
 		tollTuples.writeAsCsv("tollTuples.log", WriteMode.OVERWRITE);
-
 		// execute program
 		ssc.execute("WordCount from SocketTextStream Example");
 	}
@@ -130,7 +123,6 @@ public class LinearRoadFlink {
 	//
 	// User Functions
 	//
-
 	public static DataStream<String> parseInitialTuples(StreamExecutionEnvironment ssc, String host, String port) {
 		DataStream<String> lines = ssc.socketTextStream(host, Integer.parseInt(port));
 		return lines;
@@ -153,21 +145,15 @@ public class LinearRoadFlink {
 		});
 	}
 	
-	private static Long getMinute(Long time) {
-		return (long) (Math.ceil(time/60) + 1);
-	}
+	
 
 	private static class DetectAccidents extends RichFlatMapFunction<String, Tuple3<String, Boolean, Long>> {
 		private static final long serialVersionUID = 1888474626L;
-		private HashMap<Integer, Vehicle> vehicles;
-		private HashMap<String, ArrayList<Vehicle>> segment_stopped;
-		private HashMap<String, ArrayList<Integer>> segments;
-		private ArrayList<String> have_accidents;
-
+		private DetectAccidentOperator op;
+		
 		@Override
-		public void flatMap(String value, Collector<Tuple3<String, Boolean, Long>> out) throws Exception {
-			// check if vehicle is stopped or not
-			String val = (String) value;
+		public void flatMap(String val, Collector<Tuple3<String, Boolean, Long>> out) throws Exception {
+			ArrayList<Tuple3<String, Boolean, Long>> outarr = new ArrayList<Tuple3<String, Boolean, Long>>();
 			String[] fields = val.split(",");
 			int vid = Integer.parseInt(fields[2]);
 			long time = Long.parseLong(fields[1]);
@@ -177,85 +163,15 @@ public class LinearRoadFlink {
 			int segment = Integer.parseInt(fields[7]);
 			int position = Integer.parseInt(fields[8]);
 
-			String segid = fields[4] + "_" + fields[7];
-			Boolean has_accident = false;
-
-			// Type=0, Time, VID, Spd, Xway, Lane, Dir, Seg, Pos
-			// int id, long time, int xway, int lane, int seg, int pos
-			Vehicle v = null;
-			if (vehicles.get(vid) == null) {
-				v = new Vehicle(vid, time, xway, lane, segment, position);
-				vehicles.put(vid, v);
-			} else {
-				v = vehicles.get(vid);
-				// int pos, int xway, int seg, int lane, int speed, long time
-				v.update(position, xway, segment, lane, speed, time);
-			}
-			if (!segments.containsKey(segid)) {
-				ArrayList elems = new ArrayList<Integer>();
-				elems.add(vid);
-				segments.put(segid, elems);
-			} else {
-				if (!segments.get(segid).contains(vid))
-					segments.get(segid).add(vid);
-			}
-
-			if (v.stopped) {
-				// check if it is stopped in the same position as the other
-				// vehicles
-				if (!segment_stopped.containsKey(segid)) {
-					ArrayList<Vehicle> elems = new ArrayList<Vehicle>();
-					elems.add(v);
-					segment_stopped.put(segid, elems);
-				} else {
-					ArrayList<Vehicle> vehicles = segment_stopped.get(segid);
-					// check if there is an accident
-					for (Vehicle elem : vehicles) {
-						if (v.pos == elem.pos && v.lane == elem.lane && (v.time - elem.time) <= 120
-								&& v.xway == elem.xway) {
-							has_accident = true;
-							break;
-						}
-					}
-					if (!vehicles.contains(v))
-						vehicles.add(v);
-				}
-			}
-
-			// we output xway_segment, is_accident for all the 4 upstream
-			// segments (if is accident)
-			// is connected with position stream
-			// in the next operator we update an internal state holding the
-			// segments_with_accidents
-			// and we output accident notification for vehicle
-			if(!have_accidents.contains(segid)) {
-				have_accidents.add(segid);
-				for (int i = 0; i <= 4; i++) {
-					int realseg = segment + i;
-					if(realseg > 99)
-						break;
-					out.collect(new Tuple3<String, Boolean, Long>(xway + "_" + realseg, true, time));
-				}
-			} else {
-				out.collect(new Tuple3<String, Boolean, Long>(xway+"_"+segment, false, time));
-				if(have_accidents.contains(segid)) {
-					have_accidents.remove(segid);
-					for (int i = 1; i <= 4; i++) {
-						int realseg = segment + i;
-						if(realseg > 99)
-							break;
-						out.collect(new Tuple3<String, Boolean, Long>(xway + "_" + realseg, false, time));
-					}
-				}
+			op.run(xway, segment, time, vid, speed, lane, position, outarr);
+			for(Tuple3<String, Boolean, Long> elem : outarr) {
+				out.collect(elem);
 			}
 		}
 
 		@Override
 		public void open(Configuration parameters) throws Exception {
-			vehicles = new HashMap<Integer, Vehicle>();
-			segment_stopped = new HashMap<String, ArrayList<Vehicle>>();
-			segments = new HashMap<String, ArrayList<Integer>>();
-			have_accidents = new ArrayList<String>();
+			op = new DetectAccidentOperator();
 		}
 
 	}
@@ -264,19 +180,12 @@ public class LinearRoadFlink {
 			RichCoFlatMapFunction<String, Tuple3<String, Boolean, Long>, 
 			Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> {
 		private static final long serialVersionUID = 1888474626L;
-		private HashMap<String, Tuple2<Long, Long>> accident_segments;
-		private HashMap<Integer, String> previous_segments;
-		private HashMap<String,ArrayList<MinuteStatistics>> last_minutes; // last 5 speed values
-		private HashMap<String,NovLav> last_novlav;
-		private HashMap<String, Double> segment_tolls;
+		private OutputAccidentAndToll op;
+		
 		
 		@Override
 		public void open(Configuration parameters) throws Exception {
-			accident_segments = new HashMap<String, Tuple2<Long, Long>>();
-			previous_segments = new HashMap<Integer, String>();
-			last_minutes = new HashMap<String,ArrayList<MinuteStatistics>>();
-			last_novlav = new HashMap<String,NovLav>();
-			segment_tolls = new HashMap<String, Double>();
+			op = new OutputAccidentAndToll();
 		}
 
 		@Override
@@ -287,108 +196,33 @@ public class LinearRoadFlink {
 			String[] fields = val.split(",");
 			int vid = Integer.parseInt(fields[2]);
 			long time = Long.parseLong(fields[1]);
-			int segment = Integer.parseInt(fields[7]);
-			int lane = Integer.parseInt(fields[5]);
-			int position = Integer.parseInt(fields[8]);
 			int speed = Integer.parseInt(fields[3]);
+			int xway = Integer.parseInt(fields[4]);
+			int lane = Integer.parseInt(fields[5]);
+			int segment = Integer.parseInt(fields[7]);
+			int position = Integer.parseInt(fields[8]);
 			String segid = fields[4] + "_" + fields[7];
+			// to update the tolls
+			op.computeTolls(segid, time, vid, segment, lane, position, speed);
 			
-			long minute = getMinute(time);
-			
-			if(!last_minutes.containsKey(segid)) {
-				last_minutes.put(segid, new ArrayList<MinuteStatistics>());
+			boolean isChanged = op.vehicleChangedSegment(segid, vid);
+			if(!isChanged)
+				return;
+			boolean outputAcc = op.needToOutputAccident(segid, time, lane);
+			if(outputAcc) {
+				out.collect(new Tuple7<Integer, Integer, Long, Long, Integer, Integer,Double>
+				(1, vid, time, System.currentTimeMillis(), segment, position,0.0));
 			}
-			if(!last_novlav.containsKey(segid)) {
-				last_novlav.put(segid, new NovLav());
-			}
-			if(!segment_tolls.containsKey(segid)) {
-				segment_tolls.put(segid, 0.0);
-			}
-			
-			if(last_minutes.get(segid).size() == 0) {
-				MinuteStatistics newminute = new MinuteStatistics();
-				newminute.addVehicleSpeed(vid, speed);
-			} else {
-				MinuteStatistics lastmin = last_minutes.get(segid).get(last_minutes.size()-1);
-				if(lastmin.getTime() == minute)
-					lastmin.addVehicleSpeed(vid, speed);
-				else {
-					MinuteStatistics newlastmin = new MinuteStatistics();
-					newlastmin.addVehicleSpeed(vid, speed);
-					if(last_minutes.get(segid).size() == LinearRoadFlink.HistorySize)
-						last_minutes.get(segid).remove(0);
-				}
-			}
-			
-			// compute tolls?
-			double toll = 0;
-			if(minute > last_novlav.get(segid).getMinute()) {
-				// compute stats for last minute
-				double total_avg = 0.0;
-				if(last_minutes.get(segid).size() == LinearRoadFlink.HistorySize) {
-					for(MinuteStatistics m : last_minutes.get(segid).subList(0, last_minutes.get(segid). size()-1)) {
-						total_avg += m.speedAverage();
-					}
-				}
-				
-				last_novlav.get(segid).setLav(total_avg);
-				if(last_minutes.get(segid).size() >= 1) {
-					last_novlav.get(segid).setNov(last_minutes.get(segid).
-						get(last_minutes.get(segid).size()-1).vehicleCount());
-				}
-				last_novlav.get(segid).setMinute(minute);
-				
-				
-				if( (total_avg >= 40 && last_minutes.get(segid).size() == LinearRoadFlink.HistorySize) || last_novlav.get(segid).getNov() <=50) {
-					toll = 0;
-				} else {
-					toll = 2*(last_novlav.get(segid).getNov()-50)*(last_novlav.get(segid).getNov()-50);
-				}
-				segment_tolls.put(segid, toll);
-			}
-			
-			// if vehicle remain in the same segment then ignore
-			if(previous_segments.containsKey(vid)) {
-				if(previous_segments.get(vid) == segid)
-					return;
-			}
-			
-			previous_segments.put(vid, segid);
-			
-			synchronized(accident_segments) {
-				if(accident_segments.containsKey(segid) && lane != 4) {
-					Tuple2<Long, Long> timeacc = accident_segments.get(segid);
-					// notify vehicles no earlier than the minute following 
-					// the minute when the accident occurred
-					long minute_vid = getMinute(time);
-					long minute_acc = getMinute(timeacc.f0);
-					long minute_clear = getMinute(timeacc.f1);
-					if (minute_vid > minute_acc && time < minute_clear) {
-						out.collect(new Tuple7<Integer, Integer, Long, Long, Integer, Integer,Double>
-								(1, vid, time, System.currentTimeMillis()/1000, segment, position,0.0));
-					}
-				}
-			}
-			// output tolls
-			double vtoll = segment_tolls.get(segid);
-			int sspeed = (int) last_novlav.get(segid).getLav();
+			double vtoll = op.getCurrentToll(segid);
+			int sspeed = (int) op.getAverageSpeed(segid);
 			out.collect(new Tuple7<Integer, Integer, Long, Long, Integer, Integer,Double>
-				(0, vid, time, System.currentTimeMillis()/1000, segment, sspeed, vtoll));
+				(0, vid, time, System.currentTimeMillis(), segment, sspeed, vtoll));
 		}
 		
 		@Override
 		public void flatMap2(Tuple3<String, Boolean, Long> value,
 				Collector<Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> out) throws Exception {
-			synchronized(accident_segments) {
-				if(!accident_segments.containsKey(value.f0) && value.f1) {
-					// time at which the accident is started
-					accident_segments.put(value.f0, new Tuple2<Long, Long>(value.f2, Long.MAX_VALUE));
-				}
-				else if (accident_segments.containsKey(value.f0) && !value.f1) {
-					Tuple2<Long, Long> acc = accident_segments.get(value.f0);
-					acc.f1 = value.f2; // time at which the accident is cleared
-				}
-			}
+			op.markAndClearAccidents(value);
 		}
 	}
 
@@ -397,8 +231,9 @@ public class LinearRoadFlink {
 		@Override
 		@SuppressWarnings("unchecked")
 		public String getKey(String value) {
+			// we use xway and direction to partition the stream
 			String[] fields = value.split(",");
-			return fields[1] + "_" + fields[2];
+			return fields[4] + "_" + fields[6];
 		}
 	}
 }
