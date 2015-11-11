@@ -18,7 +18,7 @@ public class SegmentState implements Serializable{
 	  boolean isAccident;
 	  Long minuteAccident;
 	  Long minuteCleared;
-	  int cTime;
+	  long cTime;
 	  private boolean upstreamAccident;
 	  
 	  SegmentState() {

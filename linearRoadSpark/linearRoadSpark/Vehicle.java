@@ -2,8 +2,6 @@ package linearRoadSpark;
 
 import java.io.Serializable;
 
-import org.apache.spark.streaming.Time;
-
 public class Vehicle implements Serializable{
 	  public int id;
 	  public long time;
@@ -33,20 +31,27 @@ public class Vehicle implements Serializable{
 		  timeLastUpdate = System.currentTimeMillis()/1000;
 	  }
 	  
-	  void update(int pos, int dir, int lane, int speed, long time) {
+	  void update(int pos, int xway, int seg, int lane, int speed, long time) {
+		  if(pos == this.pos && xway == this.xway && seg == this.seg)
+			  this.nsamepos++;
+		  else {
+			  this.nsamepos = 0;
+			  if (this.stopped)
+				  this.stopped = false;
+		  }
+		  if(this.nsamepos == 4)
+			  this.stopped = true;
+		  
 		  this.pos = pos;
 		  this.isNew = false;
 		  this.time = time;
 		  this.lane = lane;
+		  this.xway = xway;
+		  this.seg = seg;
+		  
 		  timeLastUpdate = time;
 	  }
 	  
-	  boolean checkValidity() {
-		  long now = System.currentTimeMillis()/1000;
-		  if(now - timeLastUpdate > 30)
-			  return false;
-		  return true;
-	  }
 	  
 	  @Override
 	  public String toString() {
