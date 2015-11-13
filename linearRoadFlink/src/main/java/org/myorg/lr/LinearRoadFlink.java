@@ -1,6 +1,7 @@
 package org.myorg.lr;
 
 
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -34,20 +35,21 @@ import org.apache.flink.api.java.tuple.Tuple6;
 import org.apache.flink.api.java.tuple.Tuple7;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.FileSystem.WriteMode;
+import org.apache.flink.streaming.api.checkpoint.Checkpointed;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.co.RichCoFlatMapFunction;
 import org.apache.flink.util.Collector;
+
+
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.api.common.functions.RichMapFunction;
 
 
 public class LinearRoadFlink {
 	protected static final int windowAverage = 360; // 5 minutes
 	protected static final int windowSlide = 60;
 	protected static final int windowCount = 120;
-	
-	protected static final int HistorySize = 6; // last 5 minutes + current one
-
 
 	public static void main(String[] args) throws Exception {
 
@@ -63,16 +65,18 @@ public class LinearRoadFlink {
 		final StreamExecutionEnvironment ssc = StreamExecutionEnvironment.getExecutionEnvironment();
 		// ssc.setStreamTimeCharacteristic(TimeCharacteristic.IngestionTime);
 		// get input data
-		DataStream<String> initTuples = parseInitialTuples(ssc, args[0], args[1]);
-		DataStream<String> positionStream = generatePositionStream(initTuples).partitionByHash(new KeyExtractor());
+		DataStream<LRTuple> initTuples = parseInitialTuples(ssc, args[0], args[1]);
+		DataStream<LRTuple> positionStream = generatePositionStream(initTuples).partitionByHash(new KeyExtractor());
 		// we detect if vehicles are stopped or not
 		DataStream<Tuple3<String, Boolean, Long>> accidents = positionStream.flatMap(new DetectAccidents());
 		
-		accidents.writeAsCsv("accidentSegments.log", WriteMode.OVERWRITE);
+		DataStream<Tuple2<LRTuple, Boolean>> vidStream = generateVidStream(positionStream); 
+		
 		// this goes in the next operator which updates accidents, computes tolls and notifies
 		// incomming vehicles
 		DataStream<Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> alltuplesTollAccident = 
-				positionStream.connect(accidents).flatMap(new NotifyAccidentsAndTolls());
+				vidStream.partitionByHash(new KeyExtractorTuple()).
+				connect(accidents).flatMap(new NotifyAccidentsAndTolls());
 		//alltuplesTollAccident.print();
 		// filter accidents
 		DataStream<Tuple6<Integer, Integer, Long, Long, Integer, Integer>> accidentTuples =
@@ -114,30 +118,31 @@ public class LinearRoadFlink {
 								value.f0, value.f1, value.f2, value.f3, value.f5, value.f6.intValue());
 					}
 		});
-		accidentTuples.writeAsCsv("accidentTuples.log", WriteMode.OVERWRITE);
-		tollTuples.writeAsCsv("tollTuples.log", WriteMode.OVERWRITE);
+		accidentTuples.writeAsCsv("accidentTuplesFlink.cvs", WriteMode.OVERWRITE);
+		tollTuples.writeAsCsv("tollTuplesFlink.cvs", WriteMode.OVERWRITE);
 		// execute program
-		ssc.execute("WordCount from SocketTextStream Example");
+		ssc.execute("LinearRoad for Flink");
 	}
 
 	//
 	// User Functions
 	//
-	public static DataStream<String> parseInitialTuples(StreamExecutionEnvironment ssc, String host, String port) {
+	public static DataStream<LRTuple> parseInitialTuples(StreamExecutionEnvironment ssc, String host, String port) {
 		DataStream<String> lines = ssc.socketTextStream(host, Integer.parseInt(port));
-		return lines;
+		return lines.map(new MapFunction<String, LRTuple>() {
+			@Override
+			public LRTuple map(String value) throws Exception {
+				return new LRTuple(value);
+			}
+		});
 	}
 
-	public static DataStream<String> generatePositionStream(DataStream<String> tupleDstream) {
-		return tupleDstream.filter(new FilterFunction<String>() {
+	public static DataStream<LRTuple> generatePositionStream(DataStream<LRTuple> tupleDstream) {
+		return tupleDstream.filter(new FilterFunction<LRTuple>() {
 			private static final long serialVersionUID = 1L;
-
 			@Override
-			public boolean filter(String x) {
-				String[] fields = x.split(",");
-				byte typeField = Byte.parseByte(fields[0]);
-
-				if (typeField == 0) {
+			public boolean filter(LRTuple x) {
+				if (x.type == 0) {
 					return true;
 				}
 				return false;
@@ -145,25 +150,61 @@ public class LinearRoadFlink {
 		});
 	}
 	
+	public static DataStream<Tuple2<LRTuple, Boolean>> generateVidStream(DataStream<LRTuple> positionStream) {
+		// prepare for checking accidents in segment
+		// here I repartition the data
+		DataStream<Tuple2<LRTuple, Boolean>> vidStream = positionStream.partitionByHash(new KeySelectorByDirXway()).
+				map(new DetectNewVehicles());
+		return vidStream;
+	}
+	
+	private static class DetectNewVehicles extends RichMapFunction<LRTuple, Tuple2<LRTuple, Boolean> >
+		implements Checkpointed {
+		private HashMap<Integer, String> previous_segments;
+		
+		@Override
+		public Tuple2<LRTuple, Boolean> map(LRTuple value) throws Exception {
+			String csegment = ""+value.xway+"_"+value.seg;
+			boolean isnew = false;
+			if(previous_segments.containsKey(value.vid)) {
+				if(!previous_segments.get(value.vid).equals(csegment)) {
+					isnew = true;
+				}
+			} else {
+				isnew = true;
+			}
+			
+			previous_segments.put(value.vid, csegment);
+			return new Tuple2<LRTuple, Boolean>(value, isnew);
+		}
+		
+		@Override
+		public void open(Configuration parameters) throws Exception {
+			previous_segments = new HashMap<Integer, String>();
+		}
+
+		@Override
+		public Serializable snapshotState(long checkpointId, long checkpointTimestamp) throws Exception {
+			return previous_segments;
+		}
+
+		@Override
+		public void restoreState(Serializable state) throws Exception {
+			this.previous_segments = (HashMap<Integer, String>)state;
+		}
+	}
 	
 
-	private static class DetectAccidents extends RichFlatMapFunction<String, Tuple3<String, Boolean, Long>> {
+	private static class DetectAccidents extends RichFlatMapFunction<LRTuple, Tuple3<String, Boolean, Long>> 
+	implements Checkpointed<DetectAccidentOperator>{
 		private static final long serialVersionUID = 1888474626L;
 		private DetectAccidentOperator op;
 		
 		@Override
-		public void flatMap(String val, Collector<Tuple3<String, Boolean, Long>> out) throws Exception {
+		public void flatMap(LRTuple val, Collector<Tuple3<String, Boolean, Long>> out) throws Exception {
 			ArrayList<Tuple3<String, Boolean, Long>> outarr = new ArrayList<Tuple3<String, Boolean, Long>>();
-			String[] fields = val.split(",");
-			int vid = Integer.parseInt(fields[2]);
-			long time = Long.parseLong(fields[1]);
-			int speed = Integer.parseInt(fields[3]);
-			int xway = Integer.parseInt(fields[4]);
-			int lane = Integer.parseInt(fields[5]);
-			int segment = Integer.parseInt(fields[7]);
-			int position = Integer.parseInt(fields[8]);
 
-			op.run(xway, segment, time, vid, speed, lane, position, outarr);
+			op.run(val.xway, val.seg, val.time, val.vid, val.speed, val.lane, val.pos, outarr);
 			for(Tuple3<String, Boolean, Long> elem : outarr) {
 				out.collect(elem);
 			}
@@ -174,11 +215,24 @@ public class LinearRoadFlink {
 			op = new DetectAccidentOperator();
 		}
 
+		@Override
+		public DetectAccidentOperator snapshotState(long checkpointId, long checkpointTimestamp) throws Exception {
+			
+			return op;
+		}
+
+		@Override
+		public void restoreState(DetectAccidentOperator state) throws Exception {
+			this.op = state;
+			
+		}
+
 	}
 
 	private static class NotifyAccidentsAndTolls extends
-			RichCoFlatMapFunction<String, Tuple3<String, Boolean, Long>, 
-			Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> {
+			RichCoFlatMapFunction<Tuple2<LRTuple, Boolean>, Tuple3<String, Boolean, Long>, 
+			Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> 
+	implements Checkpointed<OutputAccidentAndToll>{
 		private static final long serialVersionUID = 1888474626L;
 		private OutputAccidentAndToll op;
 		
@@ -189,34 +243,25 @@ public class LinearRoadFlink {
 		}
 
 		@Override
-		public void flatMap1(String value, 
+		public void flatMap1(Tuple2<LRTuple, Boolean> v, 
 				Collector<Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> out)
 				throws Exception {
-			String val = (String) value;
-			String[] fields = val.split(",");
-			int vid = Integer.parseInt(fields[2]);
-			long time = Long.parseLong(fields[1]);
-			int speed = Integer.parseInt(fields[3]);
-			int xway = Integer.parseInt(fields[4]);
-			int lane = Integer.parseInt(fields[5]);
-			int segment = Integer.parseInt(fields[7]);
-			int position = Integer.parseInt(fields[8]);
-			String segid = fields[4] + "_" + fields[7];
+			LRTuple val = v.f0;
+			String segid = val.xway + "_" + val.seg;
 			// to update the tolls
-			op.computeTolls(segid, time, vid, segment, lane, position, speed);
-			
-			boolean isChanged = op.vehicleChangedSegment(segid, vid);
+			op.computeTolls(segid, val.time, val.vid, val.seg, val.lane, val.pos, val.speed);
+			boolean isChanged = v.f1;
 			if(!isChanged)
 				return;
-			boolean outputAcc = op.needToOutputAccident(segid, time, lane);
+			boolean outputAcc = op.needToOutputAccident(segid, val.time, val.lane);
 			if(outputAcc) {
 				out.collect(new Tuple7<Integer, Integer, Long, Long, Integer, Integer,Double>
-				(1, vid, time, System.currentTimeMillis(), segment, position,0.0));
+					(1, val.vid, val.time, System.currentTimeMillis(), val.seg, val.pos,0.0));
 			}
-			double vtoll = op.getCurrentToll(segid);
+			double vtoll = op.getCurrentToll(segid, outputAcc);
 			int sspeed = (int) op.getAverageSpeed(segid);
 			out.collect(new Tuple7<Integer, Integer, Long, Long, Integer, Integer,Double>
-				(0, vid, time, System.currentTimeMillis(), segment, sspeed, vtoll));
+				(0, val.vid, val.time, System.currentTimeMillis(), val.seg, sspeed, vtoll));
 		}
 		
 		@Override
@@ -224,16 +269,45 @@ public class LinearRoadFlink {
 				Collector<Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> out) throws Exception {
 			op.markAndClearAccidents(value);
 		}
+
+		@Override
+		public OutputAccidentAndToll snapshotState(long checkpointId, long checkpointTimestamp) throws Exception {
+			return op;
+		}
+
+		@Override
+		public void restoreState(OutputAccidentAndToll state) throws Exception {
+			this.op = state;
+			
+		}
 	}
 
 
-	public static class KeyExtractor implements KeySelector<String, String> {
+	public static class KeyExtractor implements KeySelector<LRTuple, String> {
 		@Override
 		@SuppressWarnings("unchecked")
-		public String getKey(String value) {
+		public String getKey(LRTuple value) {
 			// we use xway and direction to partition the stream
-			String[] fields = value.split(",");
-			return fields[4] + "_" + fields[6];
+			return ""+value.xway+"_"+value.seg;
+		}
+	}
+	
+	public static class KeyExtractorTuple implements KeySelector<Tuple2<LRTuple, Boolean>, String> {
+		@Override
+		@SuppressWarnings("unchecked")
+		public String getKey(Tuple2<LRTuple, Boolean> value) {
+			// we use xway and direction to partition the stream
+			return ""+value.f0.xway+"_"+value.f0.seg;
+		}
+	}
+	
+	
+	public static class KeySelectorByDirXway implements KeySelector<LRTuple, String> {
+		@Override
+		@SuppressWarnings("unchecked")
+		public String getKey(LRTuple value) {
+			// we use xway and direction to partition the stream
+			return ""+value.xway+"_"+value.dir;
 		}
 	}
 }
