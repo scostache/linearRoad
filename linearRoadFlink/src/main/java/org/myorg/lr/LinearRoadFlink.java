@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 import org.apache.flink.api.common.functions.FilterFunction;
@@ -66,18 +67,17 @@ public class LinearRoadFlink {
 		// ssc.setStreamTimeCharacteristic(TimeCharacteristic.IngestionTime);
 		// get input data
 		DataStream<LRTuple> initTuples = parseInitialTuples(ssc, args[0], args[1]);
-		DataStream<LRTuple> positionStream = generatePositionStream(initTuples).partitionByHash(new KeyExtractor());
+		DataStream<LRTuple> initPositionStream = generatePositionStream(initTuples);
+		DataStream<LRTuple> positionStream = initPositionStream.partitionByHash(new KeyExtractor());
 		// we detect if vehicles are stopped or not
-		DataStream<Tuple3<String, Boolean, Long>> accidents = positionStream.flatMap(new DetectAccidents());
-		
-		DataStream<Tuple2<LRTuple, Boolean>> vidStream = generateVidStream(positionStream); 
-		
+		DataStream<Tuple3<String, Boolean, Long>> accidents = positionStream.flatMap(new DetectAccidents()).partitionByHash(0);
+		DataStream<Tuple2<LRTuple, Boolean>> vidStream = generateVidStream(initPositionStream);
+		vidStream.writeAsCsv("/home/hduser/newVehiclesFlink.cvs", WriteMode.OVERWRITE);
 		// this goes in the next operator which updates accidents, computes tolls and notifies
 		// incomming vehicles
 		DataStream<Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> alltuplesTollAccident = 
 				vidStream.partitionByHash(new KeyExtractorTuple()).
 				connect(accidents).flatMap(new NotifyAccidentsAndTolls());
-		//alltuplesTollAccident.print();
 		// filter accidents
 		DataStream<Tuple6<Integer, Integer, Long, Long, Integer, Integer>> accidentTuples =
 				alltuplesTollAccident.filter(
@@ -158,39 +158,51 @@ public class LinearRoadFlink {
 		return vidStream;
 	}
 	
-	private static class DetectNewVehicles extends RichMapFunction<LRTuple, Tuple2<LRTuple, Boolean> >
+	private static class DetectNewVehicles extends RichMapFunction<LRTuple, Tuple2<LRTuple, Boolean>>
 		implements Checkpointed {
-		private HashMap<Integer, String> previous_segments;
+		private HashMap<Integer, Tuple2<String, Long>> previousSegments;
+		private static int count = 0;
 		
 		@Override
 		public Tuple2<LRTuple, Boolean> map(LRTuple value) throws Exception {
 			String csegment = ""+value.xway+"_"+value.seg;
 			boolean isnew = false;
-			if(previous_segments.containsKey(value.vid)) {
-				if(!previous_segments.get(value.vid).equals(csegment)) {
+			if(previousSegments.containsKey(value.vid)) {
+				if(!previousSegments.get(value.vid).equals(csegment)) {
 					isnew = true;
 				}
 			} else {
 				isnew = true;
 			}
-			
-			previous_segments.put(value.vid, csegment);
+			previousSegments.put(value.vid, new Tuple2<String, Long>(csegment, System.currentTimeMillis()));
+			if(count == 50) {
+				count = 0;
+				long time = System.currentTimeMillis();
+				ArrayList<Integer> toRemove = new ArrayList<Integer>();
+				for(Integer vt : this.previousSegments.keySet()) {
+					if(time - this.previousSegments.get(vt).f1 > 30000) {
+						toRemove.add(vt);
+					}
+				}
+				for(Integer vt : toRemove)
+					previousSegments.remove(vt);
+			}
 			return new Tuple2<LRTuple, Boolean>(value, isnew);
 		}
 		
 		@Override
 		public void open(Configuration parameters) throws Exception {
-			previous_segments = new HashMap<Integer, String>();
+			previousSegments = new HashMap<Integer, Tuple2<String, Long>>();
 		}
 
 		@Override
 		public Serializable snapshotState(long checkpointId, long checkpointTimestamp) throws Exception {
-			return previous_segments;
+			return previousSegments;
 		}
 
 		@Override
 		public void restoreState(Serializable state) throws Exception {
-			this.previous_segments = (HashMap<Integer, String>)state;
+			this.previousSegments = (HashMap<Integer, Tuple2<String, Long>>) state;
 		}
 	}
 	
@@ -235,7 +247,6 @@ public class LinearRoadFlink {
 	implements Checkpointed<OutputAccidentAndToll>{
 		private static final long serialVersionUID = 1888474626L;
 		private OutputAccidentAndToll op;
-		
 		
 		@Override
 		public void open(Configuration parameters) throws Exception {
@@ -307,7 +318,7 @@ public class LinearRoadFlink {
 		@SuppressWarnings("unchecked")
 		public String getKey(LRTuple value) {
 			// we use xway and direction to partition the stream
-			return ""+value.xway+"_"+value.dir;
+			return ""+value.xway;
 		}
 	}
 }

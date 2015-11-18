@@ -38,7 +38,6 @@ public class OutputAccidentAndToll implements Serializable {
 		return vtoll;
 	}
 	
-	
 	public boolean needToOutputAccident(String segid, long time, int lane) {
 		boolean res = false;
 		synchronized(segment_statistics) {

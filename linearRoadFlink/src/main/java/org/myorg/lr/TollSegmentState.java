@@ -37,7 +37,6 @@ public class TollSegmentState {
 	}
 	
 	public void markAndClearAccidents(Tuple2<Boolean, Long> value) {
-		synchronized(accidentInfo) {
 			if(value.f0 && value.f1 > accidentInfo.f0) {
 				// time at which the accident is started
 				this.accidentInfo.f0 = value.f1;
@@ -46,12 +45,10 @@ public class TollSegmentState {
 					TollSegmentState.getMinute(value.f1) > TollSegmentState.getMinute(accidentInfo.f0)) {
 				this.accidentInfo.f1 = value.f1;
 			}
-		}
 	}
 	
 	public boolean needToOutputAccident(long time, int lane) {
 		boolean res = false;
-		synchronized(accidentInfo) {
 			if(lane != 4) {
 				// notify vehicles no earlier than the minute following 
 				// the minute when the accident occurred
@@ -62,7 +59,6 @@ public class TollSegmentState {
 					res = true;
 				}
 			}
-		}
 		return res;
 	}
 	
@@ -91,8 +87,11 @@ public class TollSegmentState {
 			}
 			lastNovlav.setMinute(minute);
 			//System.out.println(last_novlav.get(segid).toString());
-			if( (total_avg >= 40 && lastMinutes.size() == historySize) || 
-					lastNovlav.getNov() <=50 ) {
+			if(lastMinutes.size() < historySize) {
+				this.setSegmentToll(0.0);
+				return;
+			}
+			if(total_avg >= 40 || lastNovlav.getNov() <=50) {
 				this.setSegmentToll(0);
 			} else {
 				this.setSegmentToll(2*(lastNovlav.getNov()-50)*(lastNovlav.getNov()-50));
