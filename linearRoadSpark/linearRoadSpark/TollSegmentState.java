@@ -3,27 +3,36 @@ package linearRoadSpark;
 import java.util.ArrayList;
 import java.util.HashMap;
 
-import org.myorg.lr.TollSegmentState;
-
 import scala.Tuple2;
 
 
 public class TollSegmentState {
 	protected static final int historySize = 6; // last 5 minutes + current one
-
 	private ArrayList<MinuteStatistics> lastMinutes; // last 5 speed values
 	private NovLav lastNovlav;
 	private double segmentToll;
 	private double totalAverageSpeed;
 	
+	private HashMap<Integer, Long> previousSegments;
+	
 	private Tuple2<Long, Long> accidentInfo;
 	
 	public TollSegmentState() {
+		setPreviousSegments(new HashMap<Integer, Long>());
 		lastMinutes = new ArrayList<MinuteStatistics>();
 		lastNovlav = new NovLav();
 		setSegmentToll(0);
 		setTotalAverage(0);
 		accidentInfo = new Tuple2<Long,Long>((long) -1,(long) -1);
+	}
+	
+	public boolean isNew(int vid, long time) {
+		boolean res = true;
+			if(getPreviousSegments().containsKey(vid)) {
+				res=false;
+			}
+			getPreviousSegments().put(vid, time);
+		return res;
 	}
 	
 	public static Long getMinute(Long time) {
@@ -39,31 +48,31 @@ public class TollSegmentState {
 	}
 	
 	public void markAndClearAccidents(Tuple2<Boolean, Long> value) {
-		synchronized(accidentInfo) {
 			if(value._1() && value._2() > accidentInfo._1()) {
 				// time at which the accident is started
 				this.accidentInfo = new Tuple2(value._2(), Long.MAX_VALUE);
 			} else if (accidentInfo._1 > 0 && !value._1 && 
 					TollSegmentState.getMinute(value._2) > TollSegmentState.getMinute(accidentInfo._1)) {
-				this.accidentInfo = new Tuple2(accidentInfo._1(), value._2());
+				this.accidentInfo = new Tuple2(accidentInfo._1(), value._2()); //remember time at which is cleared
 			}
-		}
 	}
 	
 	public boolean needToOutputAccident(long time, int lane) {
 		boolean res = false;
-		synchronized(accidentInfo) {
+		if(time - accidentInfo._1() > 60000 && accidentInfo._2 < Long.MAX_VALUE) {
+			// accident is too old, vehicles might have moved to other segments
+			return false;
+		}
 			if( lane != 4) {
 				// notify vehicles no earlier than the minute following 
 				// the minute when the accident occurred
 				long minute_vid = TollSegmentState.getMinute(time);
 				long minute_acc = TollSegmentState.getMinute(accidentInfo._1);
 				long minute_clear = TollSegmentState.getMinute(accidentInfo._2);
-				if (minute_vid > minute_acc && time < minute_clear) {
+				if (minute_vid > minute_acc && minute_vid < minute_clear) {
 					res = true;
 				}
 			}
-		}
 		return res;
 	}
 	
@@ -92,8 +101,11 @@ public class TollSegmentState {
 			}
 			lastNovlav.setMinute(minute);
 			//System.out.println(last_novlav.get(segid).toString());
-			if( (total_avg >= 40 && lastMinutes.size() == historySize) || 
-					lastNovlav.getNov() <=50 ) {
+			if(lastMinutes.size() < historySize) {
+				this.setSegmentToll(0.0);
+				return;
+			}
+			if(total_avg >= 40 || lastNovlav.getNov() <=50) {
 				this.setSegmentToll(0);
 			} else {
 				this.setSegmentToll(2*(lastNovlav.getNov()-50)*(lastNovlav.getNov()-50));
@@ -126,12 +138,15 @@ public class TollSegmentState {
 				newlastmin.setTime(minute);
 				newlastmin.addVehicleSpeed(vid, speed);
 				lastMinutes.add(newlastmin);
+				System.out.println("Adding new minute: "+minute+" "+tmp_avg);
 			}
 		}
 	}
 	
 	public double getLav() {
-		return this.lastNovlav.getLav();
+		if(this.lastMinutes.size()<2)
+			return 0;
+		return this.totalAverageSpeed/(this.lastMinutes.size()-1);
 	}
 	
 	public int getNov() {
@@ -152,6 +167,14 @@ public class TollSegmentState {
 
 	public void setTotalAverage(double totalAverage) {
 		this.totalAverageSpeed = totalAverage;
+	}
+
+	public HashMap<Integer, Long> getPreviousSegments() {
+		return previousSegments;
+	}
+
+	public void setPreviousSegments(HashMap<Integer, Long> previousSegments) {
+		this.previousSegments = previousSegments;
 	}
 
 }

@@ -28,7 +28,7 @@ public class Vehicle implements Serializable{
 		  this.pastStopped = false;
 		  this.isNew = true;
 		  timeNew = time;
-		  timeLastUpdate = System.currentTimeMillis()/1000;
+		  timeLastUpdate = System.currentTimeMillis();
 	  }
 	  
 	  void update(int pos, int xway, int seg, int lane, int speed, long time) {

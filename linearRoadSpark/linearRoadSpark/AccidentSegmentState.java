@@ -19,18 +19,29 @@ public class AccidentSegmentState {
 	private HashMap<Integer, ArrayList<Vehicle>> accidents; //<position, stopped_vehicles>
 	
 	public AccidentSegmentState() {
-		vehicles = new HashMap<Integer, Vehicle>();
+		setVehicles(new HashMap<Integer, Vehicle>());
 		stopped = new  ArrayList<Vehicle>();
 		accidents = new HashMap<Integer, ArrayList<Vehicle>>();
 	}
 	
+	@Override
+	public String toString() {
+		String res= "accident:"+this.hasAccident+" is new:"+this.isNewAccident+
+				" is cleared:"+this.isCleared+" timeNew:"+this.timeNew+" timeCleared:"+this.timeCleared;
+		for(Vehicle v: stopped) {
+			res+=" "+ v.id;
+		}
+		res+=" all vehicles: "+getVehicles().size();
+		return res;
+	}
+	
 	public Vehicle addVehicle(int vid, long time, int xway, int lane, int segment, int position, int speed) {
 		Vehicle v;
-		if (vehicles.get(vid) == null) {
+		if (getVehicles().get(vid) == null) {
 			v = new Vehicle(vid, time, xway, lane, segment, position);
-			vehicles.put(vid, v);
+			getVehicles().put(vid, v);
 		} else {
-			v = vehicles.get(vid);
+			v = getVehicles().get(vid);
 			// int pos, int xway, int seg, int lane, int speed, long time
 			v.update(position, xway, segment, lane, speed, time);
 		}
@@ -38,13 +49,18 @@ public class AccidentSegmentState {
 		
 	}
 	
+	public void removeVehicle(Vehicle v) {
+		this.vehicles.remove(v);
+	}
+	
 	public Tuple2<Boolean, Boolean> updateSegmentState(int vid, long time, int xway, int lane, int segment, int position, int speed) {
 		Vehicle v = this.addVehicle(vid, time, xway, lane, segment, position, speed);
 		boolean cleared = false;
 		boolean newacc = false;
+		this.isNewAccident = false;
+		this.isNewCleared = false;
 		if (v.stopped) {
-			// check if it is stopped in the same position as the other
-			// vehicles
+			// check if it is stopped in the same position as the other vehicles
 			newacc = addStoppedVehicle(v);
 		} else {
 			cleared = addRunningVehicle(v);
@@ -52,7 +68,7 @@ public class AccidentSegmentState {
 		return new Tuple2<Boolean, Boolean>(newacc, cleared);
 	}
 	
-	private boolean addRunningVehicle(Vehicle v) {
+	protected boolean addRunningVehicle(Vehicle v) {
 		boolean cleared = false;
 		if (stopped.size() == 0) {
 			return cleared;
@@ -65,9 +81,11 @@ public class AccidentSegmentState {
 				if (this.accidents.containsKey(v.pos)) {
 					ArrayList<Vehicle> vlist = this.accidents.get(v.pos);
 					vlist.remove(v);
+					// if there are no more vehicles involved in the accident...
 					if (vlist.size() <= 1) {
 						this.accidents.remove(v.pos);
 						if (this.accidents.size() == 0) {
+							// if there are no more accidents in the segment
 							this.isCleared = true;
 							cleared = true;
 							this.timeCleared = v.time;
@@ -80,7 +98,8 @@ public class AccidentSegmentState {
 		return cleared;
 	}
 	
-	private boolean addStoppedVehicle(Vehicle v) {
+	protected boolean addStoppedVehicle(Vehicle v) {
+		System.out.println("Adding stopped vehicle "+v.id);
 		if (!this.stopped.contains(v) && this.stopped.size() == 0) {
 			this.stopped.add(v);
 			return false;
@@ -100,8 +119,11 @@ public class AccidentSegmentState {
 						}
 						if (this.accidents.containsKey(v.pos)) {
 							// add this vehicle as involved in accident?
+							this.isNewAccident = true;
 							this.accidents.get(v.pos).add(v);
 						} else {
+							// add another accident to this segment
+							this.isNewAccident = true;
 							ArrayList<Vehicle> vids = new ArrayList<Vehicle>();
 							vids.add(v);
 							vids.add(elem);
@@ -163,6 +185,14 @@ public class AccidentSegmentState {
 
 	public void setTimeCleared(long timeCleared) {
 		this.timeCleared = timeCleared;
+	}
+
+	public HashMap<Integer, Vehicle> getVehicles() {
+		return vehicles;
+	}
+
+	public void setVehicles(HashMap<Integer, Vehicle> vehicles) {
+		this.vehicles = vehicles;
 	}
 	
 	

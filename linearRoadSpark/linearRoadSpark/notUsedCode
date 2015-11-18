@@ -1,0 +1,26 @@
+.flatMap(new FlatMapFunction<Tuple2<Integer,List<Integer>>, Tuple2<Integer,List<Integer>>>() {
+
+				@Override
+				public Iterable<Tuple2<Integer, List<Integer>>> call(Tuple2<Integer, List<Integer>> t)
+						throws Exception {
+				  List<Tuple2<Integer, List<Integer>>> newlist = new ArrayList<Tuple2<Integer, List<Integer>>>();
+  	        	  Integer seg = t._2.get(3);
+  	        	  newlist.add(new Tuple2(t._1, t._2));
+  	        	  for(int i=1; i<=4; i++) {
+  	        		  int tmp = (t._2.get(6)+i);
+  	        		  if(tmp > 99)
+  	        			  break;
+  	        		  ArrayList<Integer> elems = new ArrayList();
+  	        		  for(int j=0; j< t._2.size(); j++) {
+  	        			  if (j!= 6)
+  	        				  elems.add(t._2.get(j));
+  	        			  else
+  	        				  elems.add(tmp);
+  	        			  if(j==7)
+  	        				  elems.add(-1);
+  	        		  }
+  	        		  newlist.add(new Tuple2(t._1, elems));
+				}
+  	        	  return newlist;
+				}
+    		 });
