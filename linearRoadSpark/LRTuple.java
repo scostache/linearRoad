@@ -35,7 +35,7 @@ public class LRTuple implements Serializable{
 	@Override
 	public String toString() {
 		return "type:"+type+" time:"+time+" vid:"+vid+
-				" "+speed+" xway:"+xway+" lane:"+lane+
+				" speed:"+speed+" xway:"+xway+" lane:"+lane+
 				" dir:"+dir+" seg:"+seg+" pos:"+pos;
 	}
 }
