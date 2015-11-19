@@ -488,10 +488,8 @@ public class LinearRoadMain {
 	
 	private static class OutputSegStats implements PairFlatMapFunction<Tuple2<String, Tuple2<Iterable<LRTuple>, SegmentStatsState>>, String, 
 		Tuple3<Long, Integer, Integer>> {
-		private transient HashMap<String, Long> segMinutes;
-		{
-			segMinutes = new HashMap<String, Long>();
-		}
+		private static HashMap<String, Long> segMinutes = new HashMap<String, Long>();
+		
 		@Override
 		public Iterable<Tuple2<String, Tuple3<Long, Integer, Integer>>> call(
 				Tuple2<String, Tuple2<Iterable<LRTuple>, SegmentStatsState>> t) throws Exception {
@@ -499,13 +497,15 @@ public class LinearRoadMain {
 			ArrayList<Tuple2<String, Tuple3<Long, Integer, Integer>>> collector = new ArrayList<Tuple2<String, Tuple3<Long, Integer, Integer>>>();
 			long minute = t._2._2.getCurrentMinute();
 			boolean res = false;
-			if(!segMinutes.containsKey(t._1)) {
-				res = true;
-				segMinutes.put(t._1, minute);
-			} else {
-				if(segMinutes.get(t._1) < minute) {
+			synchronized(segMinutes) {
+				if(!segMinutes.containsKey(t._1)) {
 					res = true;
 					segMinutes.put(t._1, minute);
+				} else {
+					if(segMinutes.get(t._1) < minute) {
+						res = true;
+						segMinutes.put(t._1, minute);
+					}
 				}
 			}
 			if(res) {
