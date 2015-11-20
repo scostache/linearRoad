@@ -31,4 +31,10 @@ public class LRTuple implements Serializable{
 		pos = Integer.parseInt(elems[8]);
 	}
 
+	@Override
+	public String toString() {
+		return "type:"+type+" time:"+time+" vid:"+vid+
+				" speed:"+speed+" xway:"+xway+" lane:"+lane+
+				" dir:"+dir+" seg:"+seg+" pos:"+pos;
+	}
 }

@@ -53,5 +53,4 @@ public class DetectAccidentOperator implements Serializable{
 			}
 		}
 	}
-
 }

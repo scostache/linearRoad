@@ -14,7 +14,6 @@ public class Vehicle implements Serializable{
 	  public int nsamepos;
 	  public boolean isNew;
 	  public long timeNew;
-	  public long timeLastUpdate;
 	  
 	  Vehicle(int id, long time, int xway, int lane, int seg, int pos) {
 		  this.id = id;
@@ -28,7 +27,6 @@ public class Vehicle implements Serializable{
 		  this.pastStopped = false;
 		  this.isNew = true;
 		  timeNew = time;
-		  timeLastUpdate = System.currentTimeMillis()/1000;
 	  }
 	  
 	  void update(int pos, int xway, int seg, int lane, int speed, long time) {
@@ -41,17 +39,13 @@ public class Vehicle implements Serializable{
 		  }
 		  if(this.nsamepos == 4)
 			  this.stopped = true;
-		  
 		  this.pos = pos;
 		  this.isNew = false;
 		  this.time = time;
 		  this.lane = lane;
 		  this.xway = xway;
 		  this.seg = seg;
-		  
-		  timeLastUpdate = time;
 	  }
-	  
 	  
 	  @Override
 	  public String toString() {
