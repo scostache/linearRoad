@@ -16,7 +16,7 @@
  * limitations under the License.
  * #_
  */
-package linearRoadSpark;
+package org.myorg.lrspark;
 
 import java.io.Serializable;
 

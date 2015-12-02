@@ -1,4 +1,4 @@
-package linearRoadSpark;
+package org.myorg.lrspark;
 
 import java.util.ArrayList;
 import java.util.Comparator;

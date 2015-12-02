@@ -1,4 +1,4 @@
-package linearRoadSpark;
+package org.myorg.lrspark;
 
 import org.apache.spark.HashPartitioner;
 import org.apache.spark.Partitioner;
@@ -14,9 +14,12 @@ public class SegmentPartitioner extends HashPartitioner {
 	@Override
 	public int getPartition(Object arg0) {
 		String mykey = (String) arg0;
-		String[] segmentl = mykey.split("_");
-		String segment = segmentl[0] + "_" + segmentl[1];
-		return segment.hashCode() % partitions;
+		String[] keysplit = mykey.split("_");
+		//return mykey.hashCode() % partitions;
+		int partition = (int) Math.ceil((Integer.parseInt(keysplit[0]) + 
+				(int) Math.ceil(Integer.parseInt(keysplit[1])/4)) % partitions);
+		//System.out.println("Key: "+mykey+" partition: "+partition);
+		return partition;
 	}
 
 	@Override

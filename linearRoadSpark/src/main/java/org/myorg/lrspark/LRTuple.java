@@ -1,4 +1,4 @@
-package linearRoadSpark;
+package org.myorg.lrspark;
 
 import java.io.Serializable;
 import java.util.ArrayList;

@@ -1,4 +1,4 @@
-package linearRoadSpark;
+package org.myorg.lrspark;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -78,8 +78,8 @@ public class LinearRoadMain {
 	private static JavaPairRDD<String, TollSegmentState> tollState = null;
 
 	private static List<Tuple2<String, NewVehicleState>> vehiclePreviousSegments = Arrays
-			.asList(new Tuple2("0_0", new NewVehicleState()), 
-					new Tuple2("0_1", new NewVehicleState()));
+			.asList(new Tuple2<String,NewVehicleState>("0_0", new NewVehicleState()), 
+					new Tuple2<String,NewVehicleState>("0_1", new NewVehicleState()));
 	private static JavaPairRDD<String, NewVehicleState> vehiclePreviousSegmentState = null;
 
 	private static int checkpointCounterVid = 0;
@@ -140,7 +140,7 @@ public class LinearRoadMain {
 		JavaStreamingContext ssc = new JavaStreamingContext(sparkConf, Durations.milliseconds(batchInteval));
 		System.out.println("Min number of partitions: " + ssc.sc().defaultMinPartitions() + " default parallelism: "
 				+ ssc.sc().defaultParallelism());
-		ssc.checkpoint("hdfs://spark1:54310/checkpoint/");
+		ssc.checkpoint("hdfs://debshost:54310/checkpoint/");
 		accidentState = ssc.sc().parallelizePairs(acctuples, LinearRoadMain.currentPartitions);
 		tollState = ssc.sc().parallelizePairs(tolltuples, LinearRoadMain.currentPartitions);
 		segstatsState = ssc.sc().parallelizePairs(segstatstuples, LinearRoadMain.currentPartitions);
@@ -155,20 +155,23 @@ public class LinearRoadMain {
 		arr.remove(0);
 		JavaPairDStream<String,LRTuple> all = ssc.union(first, arr);
 		JavaPairDStream<String,LRTuple> segmentStream = generatePositionStream(all); 
-		//all.foreachRDD(new InitTuplesPrinter());
+		JavaPairDStream<String, Iterable<LRTuple>> segmentStreamGrouped = segmentStream.groupByKey(
+				new SegmentPartitioner(LinearRoadMain.currentPartitions));
+		segmentStreamGrouped.cache();
 		
-		JavaPairDStream<String,Tuple2<LRTuple, Boolean>> newVehicles = segmentStream.groupByKey()
-				.transformToPair(
+		JavaPairDStream<String,Tuple2<LRTuple, Boolean>> newVehicles = segmentStreamGrouped.transformToPair(
 						new Function2<JavaPairRDD<String,Iterable<LRTuple>>, Time, JavaPairRDD<String, Tuple2<LRTuple, Boolean>>>() {
 							private static final long serialVersionUID = -9202502146928176066L;
 							@Override
 							public JavaPairRDD<String, Tuple2<LRTuple, Boolean>> call(
 									JavaPairRDD<String, Iterable<LRTuple>> v1, Time v2) throws Exception {
-								JavaPairRDD<String, Tuple2<LRTuple, Boolean> > out = v1.leftOuterJoin(vehiclePreviousSegmentState).flatMapToPair
-										(new OutputNewSegmentVids());
+								JavaPairRDD<String, Tuple2<LRTuple, Boolean> > out = v1.leftOuterJoin(vehiclePreviousSegmentState).
+										flatMapToPair(new OutputNewSegmentVids()).
+										partitionBy(new SegmentPartitioner(LinearRoadMain.currentPartitions));
 								JavaPairRDD<String, Tuple2<Optional<Iterable<LRTuple>>, Optional<NewVehicleState>> > tmpRdd = v1
 										.fullOuterJoin(vehiclePreviousSegmentState);
-								JavaPairRDD<String, NewVehicleState> res = tmpRdd.mapToPair(new UpdatePreviousSegment())
+								JavaPairRDD<String, NewVehicleState> res = tmpRdd.mapToPair(new UpdatePreviousSegment()).
+										partitionBy(new SegmentPartitioner(LinearRoadMain.currentPartitions))
 										.persist(StorageLevel.MEMORY_AND_DISK());
 								long cnt = res.count();
 								vehiclePreviousSegmentState.unpersist(false);
@@ -181,16 +184,16 @@ public class LinearRoadMain {
 								return out;
 							}
 						});
-		//newVehicles.foreachRDD(new NewVehiclesPrinter());
+		newVehicles.foreachRDD(new NewVehiclesPrinter());
 		
-		JavaPairDStream<String, Tuple3<Long, Integer, Integer>> segstatsStream = segmentStream.groupByKey().transformToPair(
+		JavaPairDStream<String, Tuple3<Long, Integer, Integer>> segstatsStream = segmentStreamGrouped.transformToPair(
 				new Function2<JavaPairRDD<String,Iterable<LRTuple>>, Time, JavaPairRDD<String, Tuple3<Long, Integer, Integer>>>() {
 					private static final long serialVersionUID = -9202501044928153066L;
 					@Override
 					public JavaPairRDD<String, Tuple3<Long, Integer, Integer>> call(
 							JavaPairRDD<String, Iterable<LRTuple>> v1, Time v2) throws Exception {
-					
-						JavaPairRDD<String, SegmentStatsState> res = v1.fullOuterJoin(segstatsState).mapToPair(new UpdateSegmentStats())
+						JavaPairRDD<String, SegmentStatsState> res = v1.fullOuterJoin(segstatsState).mapToPair(new UpdateSegmentStats()).
+								partitionBy(new SegmentPartitioner(LinearRoadMain.currentPartitions))
 								.persist(StorageLevel.MEMORY_AND_DISK());
 						res.count();
 						segstatsState.unpersist(false);
@@ -198,18 +201,17 @@ public class LinearRoadMain {
 						if (checkpointSegCounter > maxCheckpointCounter) {
 							segstatsState.checkpoint();
 							checkpointSegCounter = 0;
-						} else
+						} else {
 							checkpointSegCounter = checkpointSegCounter + 1;
+						}
 						// outputed when the minute changes
-						JavaPairRDD<String, Tuple3<Long, Integer, Integer> > out = v1.join(segstatsState).flatMapToPair(new OutputSegStats());
+						JavaPairRDD<String, Tuple3<Long, Integer, Integer> > out = v1.join(segstatsState).flatMapToPair(new OutputSegStats()).
+								partitionBy(new SegmentPartitioner(LinearRoadMain.currentPartitions));
 						return out;
 					}
 				});
-		
 		segstatsStream.foreachRDD(new SegStatsPrinter());
-
-		JavaPairDStream<String, Tuple2<Boolean, Long>> accidentStream = segmentStream
-				.groupByKey(new HashPartitioner(LinearRoadMain.currentPartitions)).transformToPair(
+		JavaPairDStream<String, Tuple2<Boolean, Long>> accidentStream = segmentStreamGrouped.transformToPair(
 						new Function2<JavaPairRDD<String, Iterable<LRTuple>>, Time, JavaPairRDD<String, Tuple2<Boolean, Long>>>() {
 							private static final long serialVersionUID = -9202502146928153066L;
 							@Override
@@ -217,7 +219,8 @@ public class LinearRoadMain {
 									JavaPairRDD<String, Iterable<LRTuple>> v1, Time v2) throws Exception {
 								JavaPairRDD<String, Tuple2<Optional<Iterable<LRTuple>>, Optional<AccidentSegmentState> >> tmpRdd = v1
 										.fullOuterJoin(accidentState);
-								JavaPairRDD<String, AccidentSegmentState> res = tmpRdd.mapToPair(new DetectAccidents())
+								JavaPairRDD<String, AccidentSegmentState> res = tmpRdd.mapToPair(new DetectAccidents()).partitionBy(
+										new SegmentPartitioner(LinearRoadMain.currentPartitions))
 										.persist(StorageLevel.MEMORY_AND_DISK());
 								res.count();
 								accidentState.unpersist(false);
@@ -227,14 +230,14 @@ public class LinearRoadMain {
 									checkpointCounter = 0;
 								} else
 									checkpointCounter = checkpointCounter + 1;
-								return v1.join(accidentState).
-										repartitionAndSortWithinPartitions(new HashPartitioner(LinearRoadMain.currentPartitions)).
+								return v1.join(accidentState).partitionBy(new SegmentPartitioner(LinearRoadMain.currentPartitions)).
 										flatMapToPair(new OutputAccidentSegments());
 							}
 						});
-		
+		//accidentStream.foreachRDD();
+		//accidentStream.print();
 		JavaPairDStream<String, Tuple2<Iterable<Tuple2<LRTuple, Boolean>>, TollSegmentState>> alltuplesTmp = newVehicles.
-				groupByKey(new HashPartitioner(LinearRoadMain.currentPartitions))
+				groupByKey(new SegmentPartitioner(LinearRoadMain.currentPartitions))
 				.leftOuterJoin(accidentStream).leftOuterJoin(segstatsStream).transformToPair(
 						new Function2<JavaPairRDD<String, Tuple2<Tuple2<Iterable<Tuple2<LRTuple,Boolean>>, Optional<Tuple2<Boolean, Long>>>, 
 						Optional<Tuple3<Long, Integer, Integer>>>>, Time, 
@@ -249,7 +252,9 @@ public class LinearRoadMain {
 								Optional<Tuple3<Long, Integer, Integer>>>>, 
 								Optional<TollSegmentState>>> tmpRdd = v1.fullOuterJoin(tollState);
 								JavaPairRDD<String, TollSegmentState> res = tmpRdd.mapToPair(new ComputeTolls())
-										.persist(StorageLevel.MEMORY_AND_DISK()).repartition(LinearRoadMain.currentPartitions);
+												.partitionBy(
+												new SegmentPartitioner(LinearRoadMain.currentPartitions)).
+												persist(StorageLevel.MEMORY_AND_DISK());
 								res.count();
 								tollState.unpersist(false);
 								// we update the accident state here
@@ -264,7 +269,6 @@ public class LinearRoadMain {
 										Tuple2<Tuple2<Tuple2<Iterable<Tuple2<LRTuple,Boolean>>, 
 										Optional<Tuple2<Boolean,Long>>>,Optional<Tuple3<Long,Integer,Integer>>>, 
 										TollSegmentState>>, String, Tuple2<Iterable<Tuple2<LRTuple, Boolean>>, TollSegmentState> >() {
-
 											@Override
 											public Tuple2<String, Tuple2<Iterable<Tuple2<LRTuple, Boolean>>, TollSegmentState>> call(
 													Tuple2<String, Tuple2<Tuple2<Tuple2<Iterable<Tuple2<LRTuple, Boolean>>, 
@@ -272,15 +276,15 @@ public class LinearRoadMain {
 															throws Exception {
 												TollSegmentState toll = t._2._2;
 												Iterable<Tuple2<LRTuple,Boolean>> v = t._2._1._1._1;
-												return new Tuple2<String, Tuple2<Iterable<Tuple2<LRTuple, Boolean>>, TollSegmentState>>(t._1, new Tuple2(v, toll));
+												return new Tuple2<String, Tuple2<Iterable<Tuple2<LRTuple, Boolean>>, 
+														TollSegmentState>>(t._1, new Tuple2(v, toll));
 											}
-								});
-							}
-						});
-		
-		alltuplesTmp.foreachRDD(new TollTuplesPrinter() );
+								}).partitionBy(new SegmentPartitioner(LinearRoadMain.currentPartitions));
+							}});
 		JavaPairDStream<String, Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>> alltuplesTollAccident 
 			= alltuplesTmp.flatMapToPair(new OutputTollsAndAccidents());
+		
+		//alltuplesTollAccident.print();
 		
 		JavaDStream<Tuple6<Integer, Integer, Long, Long, Integer, Integer>> accidentTuples = alltuplesTollAccident
 				.filter(new Function<Tuple2<String,Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>>, Boolean>() {
@@ -351,7 +355,7 @@ public class LinearRoadMain {
 						return res;
 					}
 				});
-				return res.repartition(LinearRoadMain.currentPartitions);
+				return res;
 			}
 		});
 	}
@@ -383,7 +387,7 @@ public class LinearRoadMain {
 							public Tuple2<Integer, LRTuple> call(Tuple2<String,LRTuple> s1) {
 								return new Tuple2<Integer, LRTuple>(s1._2.vid, s1._2);
 							}
-						}).repartitionAndSortWithinPartitions(new HashPartitioner(LinearRoadMain.vidPartitions));
+						}).partitionBy(new HashPartitioner(LinearRoadMain.vidPartitions));
 						res.cache();
 						return res;
 					}
@@ -400,7 +404,6 @@ public class LinearRoadMain {
 			ArrayList<Tuple2<String, Tuple2<Boolean, Long>>> collector = new ArrayList<Tuple2<String, Tuple2<Boolean, Long>>>();
 			boolean newAcc = t._2()._2().isNewAccident();
 			boolean newClear = t._2()._2().isCleared();
-			System.out.println("Output Accident Segments: "+t._2()._2().toString());
 			if (newAcc) {
 				long time = t._2()._2().getTimeNew();
 				int segment = Integer.parseInt(t._1.split("_")[1]);
@@ -431,35 +434,9 @@ public class LinearRoadMain {
 
 	}
 	
-	private static class SharedCount extends Thread {
-		private static AtomicInteger count = new AtomicInteger(0);
-		public SharedCount() {
-			
-		}
-		
-		@Override
-		public void run() {
-			while(true) {
-				try {
-					Thread.sleep(2000);
-				} catch (InterruptedException e) {
-					e.printStackTrace();
-					continue;
-				}
-				count.incrementAndGet();
-			}
-		}
-
-		public static int getCount() {
-			return count.get();
-		}
-
-		public static void setCount(int count) {
-			SharedCount.count.set(count);
-		}
-	}
 	
-	private static class UpdateSegmentStats implements PairFunction<Tuple2<String, Tuple2<Optional<Iterable<LRTuple>>, Optional<SegmentStatsState>>>, String,
+	private static class UpdateSegmentStats implements PairFunction<Tuple2<String, Tuple2<Optional<Iterable<LRTuple>>, 
+					Optional<SegmentStatsState>>>, String,
 					SegmentStatsState>
 	{
 
@@ -494,7 +471,8 @@ public class LinearRoadMain {
 		public Iterable<Tuple2<String, Tuple3<Long, Integer, Integer>>> call(
 				Tuple2<String, Tuple2<Iterable<LRTuple>, SegmentStatsState>> t) throws Exception {
 			
-			ArrayList<Tuple2<String, Tuple3<Long, Integer, Integer>>> collector = new ArrayList<Tuple2<String, Tuple3<Long, Integer, Integer>>>();
+			ArrayList<Tuple2<String, Tuple3<Long, Integer, Integer>>> collector = new 
+					ArrayList<Tuple2<String, Tuple3<Long, Integer, Integer>>>();
 			long minute = t._2._2.getCurrentMinute();
 			boolean res = false;
 			synchronized(segMinutes) {
@@ -509,7 +487,8 @@ public class LinearRoadMain {
 				}
 			}
 			if(res) {
-				Tuple3<Long, Integer, Integer> info = new Tuple3(minute, (int) t._2._2.getCurrentAvgSpeed(), t._2._2.getCurrentNov());
+				Tuple3<Long, Integer, Integer> info = new Tuple3(minute, 
+						(int) t._2._2.getCurrentAvgSpeed(), t._2._2.getCurrentNov());
 				collector.add(new Tuple2<String, Tuple3<Long, Integer, Integer>>(t._1, info));
 			}
 			return collector;
@@ -531,20 +510,27 @@ public class LinearRoadMain {
 			} else {
 				newState = new AccidentSegmentState();
 			}
+			boolean isNew = false;
+			boolean isCleared = false;
 			if(v._2._1.isPresent()) {
 				for (LRTuple t : v._2._1.get()) {
 						// we update the state ?
 						// VID, Spd, XWay, Lane, Dir, Seg, Pos
 						newState.updateSegmentState(t.vid, t.time, t.xway, t.lane, t.seg, t.pos, t.speed);
+						isNew = isNew || newState.isNewAccident();
+						isCleared = isCleared || newState.isCleared();
 				}
 			}
+			newState.setCleared(isCleared);
+			newState.setNewAccident(isNew);
 			// we purge vehicles for which we did not receive a notification in the last 30 seconds
 			return new Tuple2<String, AccidentSegmentState>(v._1, newState);
 		}
 	}
 
 	private static class ComputeTolls implements
-			PairFunction<Tuple2<String, Tuple2<Optional<Tuple2<Tuple2<Iterable<Tuple2<LRTuple,Boolean>>, Optional<Tuple2<Boolean, Long>>>,
+			PairFunction<Tuple2<String, Tuple2<Optional<Tuple2<Tuple2<Iterable<Tuple2<LRTuple,Boolean>>, 
+			Optional<Tuple2<Boolean, Long>>>,
 			Optional<Tuple3<Long, Integer, Integer>>>>, 
 			Optional<TollSegmentState>>>, 
 			String, TollSegmentState> {
@@ -557,7 +543,8 @@ public class LinearRoadMain {
 		
 		@Override
 		public Tuple2<String, TollSegmentState> call(
-				Tuple2<String, Tuple2<Optional<Tuple2<Tuple2<Iterable<Tuple2<LRTuple,Boolean>>, Optional<Tuple2<Boolean, Long>>>,
+				Tuple2<String, Tuple2<Optional<Tuple2<Tuple2<Iterable<Tuple2<LRTuple,Boolean>>, 
+				Optional<Tuple2<Boolean, Long>>>,
 				Optional<Tuple3<Long, Integer, Integer>>>>, 
 				Optional<TollSegmentState>>> value)
 						throws Exception {
@@ -619,16 +606,17 @@ public class LinearRoadMain {
 				collector.add(new Tuple2(segid, new Tuple7<Integer, Integer, Long, Long, Integer, Integer, Double>(0, vid,
 					time, System.currentTimeMillis(), segment, sspeed, vtoll)));
 			}
-			// purge old vehicles for which we didn't receive a notification in the last 30 seconds...
-			
+			// TODO purge old vehicles for which we didn't receive a notification in the last 30 seconds...
 			return collector;
 		}
 	}
 
 	private static class OutputNewSegmentVids
-			implements PairFlatMapFunction<Tuple2<String, Tuple2<Iterable<LRTuple>, Optional<NewVehicleState>>>, String, Tuple2<LRTuple, Boolean>> {
+			implements PairFlatMapFunction<Tuple2<String, Tuple2<Iterable<LRTuple>, 
+			Optional<NewVehicleState>>>, String, Tuple2<LRTuple, Boolean>> {
 		@Override
-		public Iterable<Tuple2<String, Tuple2<LRTuple, Boolean>>> call(Tuple2<String, Tuple2<Iterable<LRTuple>, Optional<NewVehicleState>>> t)
+		public Iterable<Tuple2<String, Tuple2<LRTuple, Boolean>>> call(Tuple2<String, Tuple2<Iterable<LRTuple>, 
+				Optional<NewVehicleState>>> t)
 				throws Exception {
 			ArrayList<Tuple2<String, Tuple2<LRTuple, Boolean>>> collector = new ArrayList<Tuple2<String, Tuple2<LRTuple, Boolean>>>();
 			Iterator<LRTuple> it = t._2._1.iterator();
@@ -640,14 +628,15 @@ public class LinearRoadMain {
 						res = false;
 					}
 				}
-				collector.add( new Tuple2<String, Tuple2<LRTuple, Boolean>>(t._1, new Tuple2(value, res)));
+				collector.add(new Tuple2<String, Tuple2<LRTuple, Boolean>>(t._1, new Tuple2(value, res)));
 			}
 			return collector;
 		}
 	}
 
 	private static class UpdatePreviousSegment
-			implements PairFunction<Tuple2<String, Tuple2<Optional<Iterable<LRTuple>>, Optional<NewVehicleState>>>, String, NewVehicleState> {
+			implements PairFunction<Tuple2<String, Tuple2<Optional<Iterable<LRTuple>>, 
+			Optional<NewVehicleState>>>, String, NewVehicleState> {
 		
 		private transient int sharedCount = 0;
 		@Override
@@ -661,23 +650,20 @@ public class LinearRoadMain {
 				old_data = new NewVehicleState();
 			}
 			
-			long ctime = 0;
 			if(t._2._1.isPresent()) {
 				Iterator<LRTuple> it = t._2._1.get().iterator();
 				while(it.hasNext()) {
 					LRTuple ctuple = it.next();
 					old_data.addVehicle(ctuple.vid, ctuple.time);
-					if(ctuple.time > ctime)
-						ctime = ctuple.time;
 				}
 			}
-			
-			if(sharedCount > 50) {
+			/*
+			if(sharedCount > 50 && old_data.getHighestTime() > 60000) {
 				sharedCount = 0;
-				old_data.removeVehicles(ctime-30000);
+				old_data.removeVehicles(old_data.getHighestTime() - 60000);
 			   } else {
 				   sharedCount++;
-			   }
+			   }*/
 			return new Tuple2(key,old_data);
 		}
 	}
@@ -733,6 +719,34 @@ public class LinearRoadMain {
 		for (Tuple2<String, Tuple3<Long, Integer, Integer>> e : tuples) {
 				outLogger.println(e.toString());
 			}
+		outLogger.flush();
+		return null;
+	}
+	}
+	
+	private static class AccStatsPrinter implements Function<
+	JavaPairRDD<String, Tuple2<Boolean, Long>>, Void> {
+	private transient PrintWriter outLogger = null;
+	{
+		try {
+			outLogger = new PrintWriter(
+					new BufferedWriter(new FileWriter("/home/hduser/segstatsTuplesSpark.csv", true)));
+			outLogger.flush();
+		} catch (IOException e1) {
+			e1.printStackTrace();
+		}
+	}
+	
+	@Override
+	public Void call(
+			JavaPairRDD<String, Tuple2<Boolean, Long>> v1)
+					throws Exception {
+		if (outLogger == null)
+			return null;
+		List<Tuple2<String, Tuple2<Boolean, Long>>> tuples = v1.collect();
+		for (Tuple2<String, Tuple2<Boolean, Long>> e : tuples) {
+				outLogger.println(e.toString());
+		}
 		outLogger.flush();
 		return null;
 	}
@@ -827,14 +841,8 @@ public class LinearRoadMain {
 		
 	}
 	
-	
-
-
 	private static class AccidentPrinter
 			implements Function<JavaRDD<Tuple6<Integer, Integer, Long, Long, Integer, Integer>>, Void> {
-		/**
-		 * 
-		 */
 		private static final long serialVersionUID = 4048889437211893963L;
 		private transient PrintWriter outLogger = null;
 
@@ -864,9 +872,6 @@ public class LinearRoadMain {
 
 	private static class TollPrinter
 			implements Function<JavaRDD<Tuple6<Integer, Integer, Long, Long, Integer, Integer>>, Void> {
-		/**
-		 * 
-		 */
 		private static final long serialVersionUID = 240133268055954403L;
 		private transient PrintWriter outLogger = null;
 
