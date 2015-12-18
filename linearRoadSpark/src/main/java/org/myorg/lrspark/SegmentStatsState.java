@@ -22,7 +22,7 @@ public class SegmentStatsState {
 	}
 
 	public static Long getMinute(Long time) {
-		return (long) (Math.ceil(time / 60000) + 1);
+		return (long) (Math.ceil(time / 60) + 1);
 	}
 
 	public void updateAvgStats(long time, int vid, int speed) {

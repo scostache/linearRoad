@@ -20,7 +20,7 @@ public class ComputeStatsOperator implements Serializable {
 			s = new SegmentStatsState();
 			segmentStats.put(segment, s);
 		}
-		s.updateAvgStats(tuple.time, tuple.vid, tuple.speed);
+		s.updateAvgStats(tuple.simulated_time, tuple.vid, tuple.speed);
 	}
 	
 	public long getCurrentMinute(String segment) {
@@ -28,10 +28,19 @@ public class ComputeStatsOperator implements Serializable {
 	}
 	
 	public double getCurrentAvgSpeed(String segment) {
+		if(!this.segmentStats.containsKey(segment)) {
+			System.out.println("[LAV] No DATA for segment "+segment);
+			return 0.0;
+		}
+			
 		return this.segmentStats.get(segment).getCurrentAvgSpeed();
 	}
 	
 	public int getCurrentNov(String segment) {
+		if(!this.segmentStats.containsKey(segment)) {
+			System.out.println("[NOV] No DATA for segment "+segment);
+			return 0;
+		}
 		return this.segmentStats.get(segment).getCurrentNov();
 	}
 	

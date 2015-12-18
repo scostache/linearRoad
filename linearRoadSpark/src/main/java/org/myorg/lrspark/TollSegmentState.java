@@ -16,11 +16,11 @@ public class TollSegmentState {
 
 	@Override
 	public String toString() {
-		return lastNovlav.toString() + " ## " + segmentToll;
+		return lastNovlav.toString() + " ## " + segmentToll+" accidentInfo: "+accidentInfo.toString();
 	}
 
 	public static Long getMinute(Long time) {
-		return (long) (Math.ceil(time / 60000) + 1);
+		return (long) (Math.ceil(time / 60) + 1);
 	}
 
 	public void setCleared(long time) {
@@ -48,7 +48,7 @@ public class TollSegmentState {
 
 	public boolean needToOutputAccident(long time, int lane) {
 		boolean res = false;
-		if (time - accidentInfo._1() > 60000 && accidentInfo._2 < Long.MAX_VALUE) {
+		if (time - accidentInfo._1() > 60 && accidentInfo._2 < Long.MAX_VALUE) {
 			// accident is too old, vehicles might have moved to other segments
 			return false;
 		}

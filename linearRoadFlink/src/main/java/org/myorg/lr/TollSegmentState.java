@@ -21,7 +21,7 @@ public class TollSegmentState {
 	}
 
 	public static Long getMinute(Long time) {
-		return (long) (Math.ceil(time / 60000) + 1);
+		return (long) (Math.ceil(time / 60) + 1);
 	}
 
 	public void setCleared(long time) {
@@ -45,9 +45,9 @@ public class TollSegmentState {
 
 	public static boolean needToOutputAccident(long time, long time_acc, long time_clear) {
 		boolean res = false;
-		if (time - time_acc > 60000 && time_clear < Long.MAX_VALUE) {
+		if (time - time_acc > 60 && time_clear < Long.MAX_VALUE) {
 			// accident is too old, vehicles might have moved to other segments
-			//System.out.println("Accident is too old!");
+			System.out.println("Accident is too old: "+time+" "+time_acc+" "+time_clear);
 			return false;
 		}
 		// notify vehicles no earlier than the minute following
@@ -55,12 +55,12 @@ public class TollSegmentState {
 		long minute_vid = TollSegmentState.getMinute(time);
 		long minute_acc = TollSegmentState.getMinute(time_acc);
 		long minute_clear = TollSegmentState.getMinute(time_clear);
-		//System.out.println("Checking minutes for accidents: " + minute_vid+ " "+ minute_acc+" "+minute_clear);
-		if (minute_vid >= minute_acc && minute_vid < minute_clear) {
-			//System.out.println("Vehicle is in range of accident!");
+		System.out.println("Checking minutes for accidents: " + minute_vid+ " "+ minute_acc+" "+minute_clear);
+		if (minute_vid >= minute_acc && time > time_acc && minute_vid < minute_clear) {
+			System.out.println("Vehicle is in range of accident!");
 			res = true;
 		}
-		//System.out.println("Output accident "+res);
+		System.out.println("Output accident "+res);
 		return res;
 	}
 	

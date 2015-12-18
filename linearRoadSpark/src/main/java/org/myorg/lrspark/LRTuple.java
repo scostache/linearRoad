@@ -11,6 +11,7 @@ public class LRTuple implements Serializable{
 	// Type = 0, Time, VID, Spd, XWay, Lane, Dir, Seg, Pos
 	public int type;
 	public long time;
+	public long simulated_time;
 	public int vid;
 	public int speed;
 	public int xway;
@@ -30,6 +31,7 @@ public class LRTuple implements Serializable{
 		dir = Integer.parseInt(elems.get(6));
 		seg = Integer.parseInt(elems.get(7));
 		pos = Integer.parseInt(elems.get(8));
+		simulated_time = Integer.parseInt(elems.get(9));
 	}
 
 	@Override
